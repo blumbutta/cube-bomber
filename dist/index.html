@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#07131d" />
+    <meta name="description" content="Шесть граней. Одна арена. Бомбермэн на поверхности куба: переходи через рёбра, находи бонусы и останься последним." />
+    <title>Cube Bomber — шесть граней, одна арена</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%2307131d'/%3E%3Cpath d='M32 10 53 22v24L32 58 11 46V22Z' fill='none' stroke='%239feaef' stroke-width='4' stroke-linejoin='round'/%3E%3Cpath d='m11 22 21 12 21-12M32 34v24M22 16l21 12M21 40l11 6 11-6' fill='none' stroke='%239feaef' stroke-width='3'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body data-mode="intro">
+    <canvas id="world" tabindex="0" aria-label="Трёхмерная игровая арена на шести гранях куба"></canvas>
+    <div class="screen-shade" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="Cube Bomber — начало">
+        <svg class="brand-mark" viewBox="0 0 40 44" fill="none" aria-hidden="true"><path d="m20 2 17 10v20L20 42 3 32V12L20 2Z" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/><path d="m3 12 17 10 17-10M20 22v20M11.5 7l17 10M11.5 17v20M28.5 17v20M3 22l17 10 17-10" stroke="currentColor" stroke-width="1.7"/></svg>
+        <span>CUBE<span class="brand-light">BOMBER</span></span>
+      </a>
+      <div class="topbar-caption"><span class="live-dot"></span>06 ГРАНЕЙ <span class="caption-divider">/</span> 01 АРЕНА</div>
+      <div class="topbar-actions">
+        <button id="sound" class="icon-button" aria-label="Включить звук" aria-pressed="false" title="Звук">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 5 5.5 9H3v6h2.5l4.5 4V5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><g class="sound-on"><path d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></g><g class="sound-off"><path d="m16 9 6 6m0-6-6 6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></g></svg>
+        </button>
+        <button id="help" class="icon-button" aria-label="Правила и управление" title="Правила и управление">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.7"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .25c0 1.75-2.5 1.75-2.5 3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12" cy="16.3" r=".9" fill="currentColor"/></svg>
+        </button>
+        <button id="pause" class="icon-button" aria-label="Пауза" title="Пауза · P / Esc">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 6v12m8-12v12" stroke="currentColor" stroke-width="2.7" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main id="intro" class="intro">
+      <div class="eyebrow"><span class="little-cross" aria-hidden="true">✦</span> АРКАДА НА ШЕСТИ ГРАНЯХ</div>
+      <h1><span>CUBE</span><span class="title-outline">BOMBER<span class="title-period">.</span></span></h1>
+      <p class="intro-description"><strong>Телепузики. Бомбы. Куб.</strong><br />Обойди шесть граней, переживи взрывы<br class="desktop-break" /> и останься последним.</p>
+      <button id="start" class="primary-button start-button"><span>Начать игру</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div class="intro-instructions" aria-label="Основное управление">
+        <div class="instruction-row"><span class="instruction-keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span class="key-or">/</span><span class="arrow-keys">↑ ← ↓ →</span></span><span>Движение</span></div>
+        <div class="instruction-row"><span class="instruction-keys"><kbd class="wide-key">SPACE</kbd></span><span>Поставить бомбу</span></div>
+        <div class="instruction-row"><span class="instruction-keys transition-key"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M15.5 7A6 6 0 1 0 16 12M15.5 7V3m0 4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>0,5 сек</span><span>Поворот на новую грань</span></div>
+      </div>
+      <p class="touch-intro-hint">На телефоне — джойстик и кнопка бомбы.</p>
+    </main>
+
+    <section id="hud" class="hud hidden" aria-label="Состояние игры">
+      <div class="match-strip">
+        <div class="match-stat"><span class="stat-label">В ИГРЕ</span><span class="stat-value"><strong id="alive-count">6 / 6</strong></span></div>
+        <div class="match-stat"><span class="stat-label">ТВОЯ ГРАНЬ</span><span id="face-name" class="stat-value face-value">Верхняя</span></div>
+        <div class="match-stat"><span class="stat-label">ВРЕМЯ</span><span id="match-time" class="stat-value time-value">00:00</span></div>
+      </div>
+      <aside class="roster-panel"><div class="panel-heading">НА АРЕНЕ <span>06</span></div><div id="roster" class="roster"></div></aside>
+      <div class="ability-bar" aria-label="Бонусы игрока">
+        <div class="ability"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3m12-6 3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ability-label">ПЛАМЯ</span><strong id="range-value">2</strong></div>
+        <div class="ability"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10" cy="14" r="6.5" stroke="currentColor" stroke-width="1.6"/><path d="m14.5 9 2-2m-1 1-2-2m3 1 2-2M19 2v2m2 1h2M21 2l-1 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span class="ability-label">БОМБЫ</span><strong id="bomb-value">1</strong></div>
+        <div class="ability"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m14 3-9 11h6l-1 7 9-11h-6l1-7Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ability-label">СКОРОСТЬ</span><strong id="speed-value">1</strong></div>
+      </div>
+      <div class="view-hint"><kbd>Q</kbd><kbd>E</kbd><span>повернуть обзор</span><span class="hint-separator">·</span><kbd>P</kbd><span>пауза</span></div>
+      <div id="hazard-warning" class="hazard-warning hidden" role="alert"><span class="hazard-symbol">!</span><span>Пламя рядом.<br /><strong>Следи за соседней гранью</strong></span></div>
+    </section>
+
+    <aside class="minimap-panel" aria-label="Карта всех граней куба">
+      <div class="panel-heading">РАЗВЁРТКА КУБА <span class="map-decoration" aria-hidden="true">⌑</span></div>
+      <canvas id="minimap" width="300" height="216" aria-label="Миникарта игроков, бомб и преград"></canvas>
+      <div class="minimap-legend"><span><i class="legend-dot player-dot"></i>Ты</span><span><i class="legend-dot danger-dot"></i>Опасность</span><span class="map-size">8 × 8 × 6</span></div>
+    </aside>
+
+    <div class="arena-caption" aria-hidden="true"><div class="arena-caption-line"></div><span>БЕЗ КРАЁВ.<br /><strong>БЕЗ УКРЫТИЯ.</strong></span><span class="arena-index">[ 8 × 8 × 6 ]</span></div>
+
+    <div id="touch-controls" class="touch-controls hidden" aria-label="Сенсорное управление">
+      <div class="touch-dpad">
+        <button data-dir="0" class="touch-direction touch-up" aria-label="Вверх">↑</button>
+        <button data-dir="3" class="touch-direction touch-left" aria-label="Влево">←</button>
+        <button data-dir="1" class="touch-direction touch-right" aria-label="Вправо">→</button>
+        <button data-dir="2" class="touch-direction touch-down" aria-label="Вниз">↓</button>
+      </div>
+      <button id="touch-bomb" class="touch-bomb" aria-label="Поставить бомбу"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="13" cy="19" r="8" stroke="currentColor" stroke-width="2"/><path d="m19 12 3-3m-2 1-2-2m4 1 2-2m1-4v2m3 2h2m-2-4-1 1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>БОМБА</span></button>
+    </div>
+
+    <section id="pause-panel" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+      <div class="modal-card"><div class="eyebrow">МОМЕНТ ПЕРЕД ВЗРЫВОМ</div><h2 id="pause-title">Пауза<span>.</span></h2><p>Куб подождёт. Можно выдохнуть.</p><button id="resume" class="primary-button">Продолжить <span aria-hidden="true">↗</span></button><button id="restart-pause" class="secondary-button">Новая игра</button><div class="modal-shortcut"><kbd>P</kbd> или <kbd>Esc</kbd> — продолжить</div></div>
+    </section>
+    <section id="finish-panel" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="finish-title">
+      <div class="modal-card finish-card"><div class="eyebrow">ЕЩЁ ОДИН ПОВОРОТ</div><h2 id="finish-title">Победа<span>!</span></h2><p id="finish-description">Все шесть граней теперь твои.</p><div id="finish-stats" class="finish-stats"></div><button id="restart" class="primary-button">Сыграть ещё <span aria-hidden="true">↗</span></button><div class="modal-shortcut"><kbd>R</kbd> — начать заново</div></div>
+    </section>
+    <section id="help-panel" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="help-title">
+      <div class="modal-card help-card"><button id="close-help" class="icon-button modal-close" aria-label="Закрыть правила">×</button><div class="eyebrow">ШЕСТЬ ГРАНЕЙ. ОДНА АРЕНА.</div><h2 id="help-title">Как играть<span>.</span></h2><p class="help-lead">Ты и пять ботов начинаете на разных гранях куба. Останься последним.</p><div class="rules"><div><span class="rule-number">01</span><p><strong>Края — это переходы.</strong>Шагни за ребро, чтобы оказаться на соседней грани. Камера повернётся вслед за тобой за 0,5 секунды.</p></div><div><span class="rule-number">02</span><p><strong>У пламени тоже нет границ.</strong>Взрыв идёт в четырёх направлениях и огибает куб. Тёмные стены его останавливают. Оранжевые кирпичи с крестом разрушаются. Стартовая дальность — 1 клетка.</p></div><div><span class="rule-number">03</span><p><strong>Ищи бонусы под кирпичами.</strong>Чаще всего выпадает количество бомб, реже — дальность. Скорость растёт понемногу: +7% за бонус, максимум +21%. Собственные взрывы тоже опасны.</p></div><div><span class="rule-number">04</span><p><strong>Свои бомбы можно пинать.</strong>Отойди хотя бы на клетку и шагни обратно на свою бомбу. Она покатится вперёд, в том числе за ребро куба. Таймер продолжает идти.</p></div></div><div class="help-controls"><span><kbd>WASD</kbd> <kbd>↑←↓→</kbd> движение</span><span><kbd>Space</kbd> бомба</span><span><kbd>Q</kbd> <kbd>E</kbd> обзор</span><span><kbd>P</kbd> <kbd>Esc</kbd> пауза</span></div></div>
+    </section>
+    <section id="error-panel" class="modal-backdrop hidden" role="alert"><div class="modal-card"><div class="eyebrow">НЕ УДАЛОСЬ ОТКРЫТЬ АРЕНУ</div><h2>Нужен 3D<span>.</span></h2><p id="error-message">Браузер не смог запустить WebGL. Попробуй включить аппаратное ускорение или открыть игру в другом браузере.</p></div></section>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="./game.js"></script>
+  </body>
+</html>
