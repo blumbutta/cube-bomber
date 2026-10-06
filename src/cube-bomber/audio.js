@@ -2,6 +2,14 @@ const BPM = 108;
 const STEP_SECONDS = 60 / BPM / 4;
 const midi = note => 440 * 2 ** ((note - 69) / 12);
 const VOICE_PITCHES = [320, 190, 245, 380, 285, 345];
+const VOICE_PROFILES = [
+  { timbre: 'singing', notes: [['ah', 0, 0.24, 1], ['ah', 0.22, 0.24, 1.25], ['oh', 0.44, 0.32, 1.5]] },
+  { timbre: 'warm', notes: [['oo', 0, 0.38, 0.88], ['oh', 0.4, 0.48, 0.76]] },
+  { timbre: 'punchy', notes: [['eh', 0, 0.095, 1], ['ah', 0.12, 0.095, 1.08], ['eh', 0.32, 0.11, 0.96], ['oo', 0.45, 0.16, 0.9]] },
+  { timbre: 'bright', notes: [['oh', 0, 0.10, 1], ['eh', 0.11, 0.10, 1.18], ['ah', 0.22, 0.18, 1.42]] },
+  { timbre: 'robot', notes: [['eh', 0, 0.12, 1], ['oo', 0.16, 0.12, 0.8], ['eh', 0.32, 0.20, 1.2]] },
+  { timbre: 'airy', notes: [['oo', 0, 0.10, 1.4], ['eh', 0.1, 0.10, 1.75], ['oo', 0.2, 0.10, 1.4], ['ah', 0.3, 0.26, 2]] },
+];
 const VOWELS = {
   eh: [520, 1840, 2600],
   oh: [430, 850, 2400],
@@ -24,11 +32,11 @@ export class GameAudio {
     this.activeSources = new Set();
     this.lastExplosion = -Infinity;
     this.lastVoice = -Infinity;
-    this.voiceNumber = 0;
     this.unavailable = false;
   }
 
   get enabled() { return this._enabled; }
+  get isReady() { return this.context?.state === 'running'; }
 
   setEnabled(enabled) {
     this._enabled = Boolean(enabled);
@@ -42,20 +50,32 @@ export class GameAudio {
     }
   }
 
-  /** Call from a click / key gesture to satisfy browser autoplay requirements. */
-  async start() {
+  /** Autoplay is best effort; a later click / key gesture can always retry unlock. */
+  async start({ autoplay = false } = {}) {
     if (this.unavailable) return false;
     try {
       if (!this.context) this.createContext();
       if (!this.context) return false;
-      if (this.context.state === 'suspended') await this.context.resume();
       this._playing = true;
+      if (!this.isReady && !autoplay && this.context.state !== 'closed') {
+        // Some browsers leave resume() pending when a gesture is rejected.
+        // Resolve promptly; onstatechange handles a later successful unlock.
+        await new Promise(resolve => {
+          const timeout = setTimeout(() => resolve(false), 250);
+          let resumed;
+          try { resumed = this.context.resume(); }
+          catch { clearTimeout(timeout); resolve(false); return; }
+          Promise.resolve(resumed).then(
+            () => { clearTimeout(timeout); resolve(this.isReady); },
+            () => { clearTimeout(timeout); resolve(false); },
+          );
+        });
+      }
       this.ramp(this.master.gain, this._enabled ? 0.4 : 0, 0.018);
-      if (this._enabled && this.context.state === 'running') this.beginSequencer();
-      return this.context.state === 'running';
+      if (this._enabled && this.isReady) this.beginSequencer();
+      return this.isReady;
     } catch {
-      // The game remains fully playable on devices without usable WebAudio.
-      this.unavailable = true;
+      // A transient autoplay / device denial must not disable a future gesture.
       return false;
     }
   }
@@ -93,6 +113,10 @@ export class GameAudio {
     this.effectsBus.connect(compressor);
     compressor.connect(this.master);
     this.master.connect(context.destination);
+    context.onstatechange = () => {
+      if (this.isReady && this._enabled && this._playing) this.beginSequencer();
+      else this.stopSequencer();
+    };
 
     this.noiseBuffer = context.createBuffer(1, context.sampleRate * 2, context.sampleRate);
     const samples = this.noiseBuffer.getChannelData(0);
@@ -113,12 +137,13 @@ export class GameAudio {
     source.stop(end);
   }
 
-  stopSources(group) {
+  stopSources(group, delay = 0.03) {
     if (!this.context) return;
-    const stopAt = this.context.currentTime + 0.03;
+    const stopAt = this.context.currentTime + delay;
     for (const record of this.activeSources) {
       if (group && record.group !== group) continue;
       try { record.source.stop(stopAt); } catch { /* Already stopped. */ }
+      this.activeSources.delete(record);
     }
   }
 
@@ -234,49 +259,92 @@ export class GameAudio {
     }
   }
 
-  syllable(actorId, vowel, time, duration = 0.2, pitchScale = 1) {
+  syllable(actorId, vowel, time, duration = 0.2, pitchScale = 1, { group = 'effects', timbre = 'warm', falling = false } = {}) {
     const context = this.context;
     const pitch = VOICE_PITCHES[((actorId % VOICE_PITCHES.length) + VOICE_PITCHES.length) % VOICE_PITCHES.length] * pitchScale;
     const source = context.createOscillator();
-    source.type = 'sawtooth';
-    source.frequency.setValueAtTime(pitch * 0.86, time);
-    source.frequency.exponentialRampToValueAtTime(pitch * 1.08, time + duration * 0.35);
-    source.frequency.exponentialRampToValueAtTime(pitch * 0.94, time + duration);
+    source.type = timbre === 'robot' ? 'square' : 'sawtooth';
+    source.frequency.setValueAtTime(pitch * (timbre === 'robot' ? 1 : 0.9), time);
+    if (timbre === 'robot') {
+      source.frequency.setValueAtTime(pitch * 1.25, time + duration * 0.4);
+      source.frequency.setValueAtTime(pitch * (falling ? 0.65 : 0.85), time + duration * 0.7);
+    } else {
+      source.frequency.exponentialRampToValueAtTime(pitch * (timbre === 'singing' ? 1 : 1.08), time + duration * 0.35);
+      source.frequency.exponentialRampToValueAtTime(pitch * (falling ? 0.64 : 0.96), time + duration);
+    }
     const envelope = context.createGain();
     envelope.gain.setValueAtTime(0.0001, time);
-    envelope.gain.linearRampToValueAtTime(0.25, time + 0.025);
+    envelope.gain.linearRampToValueAtTime(timbre === 'airy' ? 0.17 : 0.25, time + (timbre === 'punchy' ? 0.009 : 0.025));
     envelope.gain.setValueAtTime(0.18, time + duration * 0.55);
     envelope.gain.exponentialRampToValueAtTime(0.0001, time + duration);
     for (const [i, frequency] of VOWELS[vowel].entries()) {
       const formant = context.createBiquadFilter();
       formant.type = 'bandpass';
       formant.frequency.setValueAtTime(frequency * (0.95 + actorId * 0.016), time);
-      formant.Q.value = [4, 7, 9][i];
+      formant.Q.value = (timbre === 'robot' ? [8, 11, 13] : [4, 7, 9])[i];
       const mix = context.createGain();
       mix.gain.value = [1, 0.58, 0.27][i];
       source.connect(formant);
       formant.connect(mix);
       mix.connect(envelope);
     }
-    this.route(envelope, 'effects', actorId === 0 ? 0 : (actorId % 2 ? -0.18 : 0.18));
-    this.tone({ time, frequency: pitch, endFrequency: pitch * 0.94, duration, volume: 0.035, wave: 'sine' });
+    if (timbre === 'robot' || timbre === 'airy') {
+      const modulation = context.createOscillator();
+      modulation.frequency.value = timbre === 'robot' ? 32 : 11;
+      const depth = context.createGain();
+      depth.gain.value = timbre === 'robot' ? 0.065 : 42;
+      modulation.connect(depth);
+      depth.connect(timbre === 'robot' ? envelope.gain : source.detune);
+      modulation.start(time);
+      this.track(modulation, group, time + duration + 0.02);
+    }
+    this.route(envelope, group, actorId === 0 ? 0 : (actorId % 2 ? -0.18 : 0.18));
+    this.tone({ time, frequency: pitch, endFrequency: pitch * (falling ? 0.64 : 0.96), duration, volume: timbre === 'singing' ? 0.07 : 0.035, wave: 'sine', group });
+    if (timbre === 'airy') this.noise({ time, duration, volume: 0.026, frequency: 4200, group });
+    if (timbre === 'robot') this.tone({ time, frequency: pitch * 3, endFrequency: pitch * 1.5, duration: duration * 0.6, volume: 0.037, wave: 'square', cutoff: 2100, group });
     source.start(time);
-    this.track(source, 'effects', time + duration + 0.03);
+    this.track(source, group, time + duration + 0.03);
   }
 
-  voice(actorId, time = this.context.currentTime, excited = false, force = false) {
+  voice(actorId, time = this.context.currentTime, excited = false, force = false, { group = 'effects', mood = 'normal' } = {}) {
     if (!force && time - this.lastVoice < 0.7) return;
-    this.lastVoice = time;
-    const patterns = [['eh', 'oh'], ['ah', 'oo'], ['oh', 'eh']];
-    const pattern = patterns[this.voiceNumber++ % patterns.length];
-    this.syllable(actorId, pattern[0], time, 0.18, excited ? 1.12 : 1);
-    this.syllable(actorId, pattern[1], time + 0.19, excited ? 0.3 : 0.23, excited ? 1.28 : 0.91);
+    if (group !== 'preview') this.lastVoice = time;
+    const profileId = ((Math.trunc(actorId) % VOICE_PROFILES.length) + VOICE_PROFILES.length) % VOICE_PROFILES.length;
+    const profile = VOICE_PROFILES[profileId];
+    const dying = mood === 'death';
+    const speed = dying ? 1.15 : excited ? 0.92 : 1;
+    const pitch = dying ? 0.68 : excited ? 1.12 : 1;
+    for (const [vowel, offset, duration, scale] of profile.notes) {
+      this.syllable(profileId, vowel, time + offset * speed, duration * speed, scale * pitch, { group, timbre: profile.timbre, falling: dying });
+    }
   }
 
   event(type, actorId = 0) {
     if (!this.context || !this._enabled || this.context.state !== 'running') return;
     const now = this.context.currentTime;
     switch (type) {
+      case 'collapse-tick':
+        this.tone({ frequency: 760, endFrequency: 650, duration: 0.13, volume: 0.2, wave: 'triangle' });
+        this.tone({ time: now + 0.035, frequency: 1520, duration: 0.07, volume: 0.065, wave: 'sine' });
+        break;
+      case 'collapse':
+        // Snapping fasteners, a falling sub-bass sweep, then the panel's metallic impact.
+        [0, 0.09, 0.19, 0.33].forEach((offset, i) => {
+          this.noise({ time: now + offset, duration: 0.12, volume: 0.22, frequency: 3400 - i * 450 });
+          this.tone({ time: now + offset, frequency: 960 - i * 150, endFrequency: 170, duration: 0.25, volume: 0.12, wave: 'triangle' });
+        });
+        this.noise({ duration: 1.45, volume: 0.55, frequency: 900, endFrequency: 65, filterType: 'lowpass' });
+        this.tone({ frequency: 125, endFrequency: 24, duration: 1.8, volume: 0.6, attack: 0.02 });
+        this.noise({ time: now + 0.7, duration: 0.7, volume: 0.3, frequency: 2200, endFrequency: 150, filterType: 'lowpass' });
+        [147, 239, 413].forEach(frequency => this.tone({ time: now + 0.7, frequency, endFrequency: frequency * 0.7, duration: 0.9, volume: 0.1, wave: 'triangle' }));
+        break;
+      case 'countdown':
+        this.tone({ frequency: 440, endFrequency: 420, duration: 0.10, volume: 0.18, wave: 'sine' });
+        break;
+      case 'select':
+        this.stopSources('preview', 0);
+        this.voice(actorId, now, false, true, { group: 'preview' });
+        break;
       case 'start':
         this.tone({ time: now, frequency: 160, endFrequency: 640, duration: 0.22, volume: 0.13, wave: 'triangle' });
         this.voice(actorId, now + 0.12, true, true);
@@ -305,12 +373,11 @@ export class GameAudio {
       case 'death':
         this.tone({ frequency: 510, endFrequency: 70, duration: 0.73, volume: 0.24, wave: 'triangle' });
         [0, 1, 2, 3].forEach(i => this.tone({ time: now + i * 0.12, frequency: 370 - i * 65, endFrequency: 160 - i * 25, duration: 0.17, volume: 0.105, wave: 'sine' }));
-        this.syllable(actorId, 'oh', now + 0.1, 0.4, 0.72);
+        this.voice(actorId, now + 0.1, false, true, { mood: 'death' });
         break;
       case 'victory':
         [69, 72, 76, 81, 79, 81].forEach((note, i) => this.tone({ time: now + i * 0.13, frequency: midi(note), duration: i === 5 ? 0.55 : 0.25, volume: 0.23, wave: 'triangle', pan: (i % 2 ? 1 : -1) * 0.2 }));
         this.voice(actorId, now + 0.56, true, true);
-        this.syllable(actorId, 'ah', now + 1.03, 0.36, 1.32);
         break;
       case 'voice':
         this.voice(actorId);

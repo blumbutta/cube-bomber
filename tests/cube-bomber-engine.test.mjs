@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SIZE, BOMB_STEP_SECONDS, FACES, Game, neighbor, tileKey, worldPoint } from '../src/cube-bomber/engine.js';
+import { SIZE, BOMB_STEP_SECONDS, FACE_COLLAPSE_INTERVAL, FACE_COLLAPSE_WARNING, FACES, Game, neighbor, tileKey, worldPoint, movementProgress, flameVulnerableCells, bombFlameCells, bombExplosionCell } from '../src/cube-bomber/engine.js';
 
 const key = cell => tileKey(cell.face, cell.x, cell.y);
 function emptyGame(options = {}) {
@@ -15,7 +15,284 @@ function bomb(game, face, x, y, range = 3, fuse = 2.7, owner = 0) {
   game.bombs.push(value);
   return value;
 }
-function position(actor, face, x, y) { Object.assign(actor, { face, x, y, moveCooldown: 0 }); }
+function position(actor, face, x, y) { Object.assign(actor, { face, x, y, previous: { face, x, y }, movedAt: 0, moveCooldown: 0, stepDuration: 0 }); }
+const inverseSmooth = progress => 0.5 - Math.sin(Math.asin(1 - 2 * progress) / 3);
+const adjacentFaces = (a, b) => FACES[a].n.reduce((sum, value, i) => sum + value * FACES[b].n[i], 0) === 0;
+
+test('collapse warns exactly10seconds before120, happens once, and clears the danger warning', () => {
+  const game = emptyGame();
+  assert.equal(FACE_COLLAPSE_INTERVAL, 120);
+  assert.equal(FACE_COLLAPSE_WARNING, 10);
+  assert.equal(game.nextCollapse.at, 120);
+  const target = game.nextCollapse.face;
+  const safe = FACES.find(face => face.id !== target).id;
+  game.players.forEach(actor => position(actor, safe, 3, 3));
+  game.update(109.999);
+  assert.equal(game.events.filter(event => event.type === 'collapse-warning').length, 0);
+  assert.equal(game.dangerMap().size, 0);
+  game.update(0.001);
+  assert.deepEqual(game.events.find(event => event.type === 'collapse-warning'), { type: 'collapse-warning', face: target, at: 120 });
+  assert.ok(Math.abs(game.dangerMap().get(tileKey(target, 3, 3)) - 10) < 1e-8);
+  game.update(9.999);
+  assert.equal(game.collapsedFaces.size, 0);
+  game.update(0.001);
+  assert.equal(game.isFaceActive(target), false);
+  assert.ok(Math.abs(game.faceCollapses.get(target) - 120) < 1e-8);
+  assert.ok(Math.abs(game.nextCollapse.at - 240) < 1e-8);
+  assert.equal(game.dangerMap().size, 0);
+  game.update(0.1);
+  assert.equal(game.events.filter(event => event.type === 'collapse-warning').length, 1);
+  assert.equal(game.events.filter(event => event.type === 'collapse').length, 1);
+});
+
+test('collapse starts randomly, proceeds to adjacent faces, preserves connectivity, and leaves one face', () => {
+  const firstFaces = new Set();
+  for (let seed = 0; seed < 48; seed++) {
+    const game = emptyGame({ seed });
+    firstFaces.add(game.nextCollapse.face);
+    let lastFace = null;
+    for (let round = 1; round <= 5; round++) {
+      const { face, at } = game.nextCollapse;
+      if (lastFace !== null) assert.ok(adjacentFaces(lastFace, face));
+      assert.equal(at, round * FACE_COLLAPSE_INTERVAL);
+      const safe = FACES.find(candidate => game.isFaceActive(candidate.id) && candidate.id !== face).id;
+      game.players.forEach(actor => position(actor, safe, 3, 3));
+      game.time = at;
+      assert.equal(game.collapseFace(face), true);
+      assert.equal(game.collapsedFaces.size, round);
+      const remaining = FACES.filter(candidate => game.isFaceActive(candidate.id)).map(candidate => candidate.id);
+      const reached = new Set([remaining[0]]);
+      const queue = [remaining[0]];
+      for (let i = 0; i < queue.length; i++) for (const next of remaining) {
+        if (!reached.has(next) && adjacentFaces(queue[i], next)) { reached.add(next); queue.push(next); }
+      }
+      assert.equal(reached.size, remaining.length);
+      lastFace = face;
+    }
+    assert.equal(game.nextCollapse, null);
+    const final = FACES.find(face => game.isFaceActive(face.id)).id;
+    assert.equal(game.collapseFace(final), false);
+    assert.equal(game.events.filter(event => event.type === 'collapse').length, 5);
+    game.reset(seed);
+    assert.equal(game.collapsedFaces.size, 0);
+    assert.equal(game.faceCollapses.size, 0);
+    assert.equal(game.nextCollapse.at, FACE_COLLAPSE_INTERVAL);
+    assert.ok(FACES.every(face => game.isFaceActive(face.id)));
+  }
+  assert.equal(firstFaces.size, 6);
+});
+
+test('collapse removes its content and kills one simultaneous batch, even during spawn protection', () => {
+  const game = emptyGame();
+  game.players.forEach(actor => position(actor, 1, 3, 3));
+  position(game.players[1], 0, 3, 3);
+  position(game.players[2], 0, 4, 3);
+  game.players[1].protectedUntil = 1000;
+  game.players[2].protectedUntil = 1000;
+  game.grid[0][2][3] = 2;
+  const removed = bomb(game, 0, 3, 3, 1, 9, 1);
+  const kept = bomb(game, 1, 0, 0, 1, 9, 3);
+  game.bonuses.push({ face: 0, x: 2, y: 2, type: 'range' }, { face: 1, x: 2, y: 2, type: 'bomb' });
+  game.flames.push({ face: 0, x: 1, y: 1, ttl: 1 }, { face: 1, x: 1, y: 1, ttl: 1 });
+  game.time = 120;
+  game.collapseFace(0);
+  assert.equal(game.players[1].alive, false);
+  assert.equal(game.players[2].alive, false);
+  assert.equal(game.players[1].place, 6);
+  assert.equal(game.players[2].place, 6);
+  assert.ok(game.events.filter(event => event.type === 'death').every(event => event.cause === 'collapse' && event.face === 0));
+  assert.ok(game.grid[0].flat().every(tile => tile === 0));
+  assert.deepEqual(game.bombs, [kept]);
+  assert.ok(!game.bonuses.some(bonus => bonus.face === 0));
+  assert.ok(!game.flames.some(flame => flame.face === 0));
+  assert.equal(game.canEnter({ face: 0, x: 3, y: 3 }), false);
+  assert.deepEqual(game.blastCells(removed), []);
+});
+
+test('collapse uses the same20%entry and80%exit grace and reports the falling face in death events', () => {
+  for (const [collapsing, fraction, survives] of [['source', 0.7999, false], ['source', 0.8, true], ['destination', 0.2, true], ['destination', 0.2001, false]]) {
+    const game = emptyGame();
+    const actor = game.players[0];
+    position(actor, 0, 7, 2);
+    game.move(0, 1);
+    game.time = inverseSmooth(fraction) * actor.stepDuration;
+    const target = collapsing === 'source' ? 0 : actor.face;
+    game.collapseFace(target);
+    assert.equal(actor.alive, survives);
+    if (!survives) {
+      const death = game.events.find(event => event.type === 'death' && event.id === 0);
+      assert.equal(death.face, target);
+      assert.equal(death.cause, 'collapse');
+    } else {
+      assert.equal(game.isFaceActive(actor.face), true);
+      if (collapsing === 'destination') {
+        assert.equal(actor.face, 0);
+        assert.equal(actor.stepDuration, 0);
+        assert.equal(actor.moveCooldown, 0);
+        assert.equal(actor.dir, 1);
+        assert.ok(game.events.some(event => event.type === 'collapse-return' && event.id === 0));
+      }
+    }
+  }
+});
+
+test('collapse warning makes bots leave a clear face even without any bomb danger', () => {
+  const game = emptyGame({ bots: true });
+  game.players.forEach(actor => { actor.protectedUntil = 1000; actor.botThink = 1000; });
+  const actor = game.players[1];
+  actor.botThink = 0;
+  game.nextCollapse = { face: actor.face, at: 10 };
+  assert.equal(game.bombs.length, 0);
+  game.update(2);
+  assert.notEqual(actor.face, 1);
+  assert.equal(actor.alive, true);
+  assert.ok(game.events.some(event => event.type === 'move' && event.id === actor.id && event.from.face !== event.to.face));
+});
+
+test('a warned bot trapped by bricks plants a breakout bomb and takes temporary cover', () => {
+  const game = new Game({ seed: 8312, bots: true });
+  game.players.forEach(actor => { actor.protectedUntil = 0; actor.botThink = 1000; });
+  game.players[1].botThink = 0;
+  game.nextCollapse = { face: 1, at: 10 };
+  game.update(3.2);
+  assert.ok(game.events.some(event => event.type === 'bomb' && event.owner === 1));
+  assert.ok(game.events.some(event => event.type === 'brick' && event.face === 1));
+  assert.equal(game.players[1].alive, true);
+});
+
+test('rolling bomb contact follows visible20%/80% thresholds and detonation centers switch at50%', () => {
+  const source = { face: 0, x: 3, y: 3 };
+  const destination = { face: 0, x: 4, y: 3 };
+  const rolling = { ...destination, previous: source, movedAt: 10, moving: true };
+  for (const [fraction, expected] of [[0, [source]], [0.2, [source]], [0.2001, [source, destination]], [0.5, [source, destination]], [0.7999, [source, destination]], [0.8, [destination]], [1, [destination]]]) {
+    const time = rolling.movedAt + inverseSmooth(fraction) * BOMB_STEP_SECONDS;
+    assert.deepEqual(bombFlameCells(rolling, time), expected);
+    assert.deepEqual(bombExplosionCell(rolling, time), fraction < 0.5 ? source : destination);
+  }
+  assert.deepEqual(bombExplosionCell(rolling, rolling.movedAt + inverseSmooth(0.4999) * BOMB_STEP_SECONDS), source);
+  assert.deepEqual(bombExplosionCell(rolling, rolling.movedAt + inverseSmooth(0.5001) * BOMB_STEP_SECONDS), destination);
+  assert.deepEqual(bombFlameCells(destination, 10), [destination]);
+  assert.deepEqual(bombExplosionCell(destination, 10), destination);
+});
+
+test('stationary bombs chain across every pair of owners and return each owner capacity', () => {
+  for (let firstOwner = 0; firstOwner < 6; firstOwner++) for (let secondOwner = 0; secondOwner < 6; secondOwner++) {
+    const game = emptyGame();
+    bomb(game, 0, 4, 2, 1, 0.05, firstOwner);
+    bomb(game, 0, 4, 3, 1, 8, secondOwner);
+    game.update(0.05);
+    assert.equal(game.bombs.length, 0);
+    assert.deepEqual(game.events.filter(event => event.type === 'explode').map(event => event.owner), [firstOwner, secondOwner]);
+  }
+});
+
+test('rays stop at a moving bomb visible footprint instead of passing through its trailing body', () => {
+  const game = emptyGame();
+  const trigger = bomb(game, 0, 3, 3, 5, 0.2, 0);
+  const moving = bomb(game, 0, 6, 4, 1, 9, 1);
+  Object.assign(moving, { previous: { face: 0, x: 6, y: 3 }, movedAt: 0, moving: true });
+  game.time = inverseSmooth(0.1) * BOMB_STEP_SECONDS;
+  const cells = new Set(game.blastCells(trigger).map(key));
+  assert.ok(cells.has('0:6:3'));
+  assert.ok(!cells.has('0:7:3'));
+  game.explode(trigger);
+  assert.equal(game.bombs.length, 0);
+  const secondary = game.events.find(event => event.type === 'explode' && event.id === moving.id);
+  assert.deepEqual([secondary.face, secondary.x, secondary.y], [0, 6, 3]);
+});
+
+test('danger propagation tracks every rolling bomb that overlaps the same physical cell', () => {
+  const game = emptyGame();
+  game.time = 1;
+  bomb(game, 0, 5, 1, 2, 0.1, 0);
+  const first = bomb(game, 0, 5, 3, 1, 8, 1);
+  Object.assign(first, { previous: { face: 0, x: 4, y: 3 }, movedAt: game.time - inverseSmooth(0.4) * BOMB_STEP_SECONDS });
+  const second = bomb(game, 0, 5, 4, 1, 9, 2);
+  Object.assign(second, { previous: { face: 0, x: 5, y: 3 }, movedAt: game.time - inverseSmooth(0.6) * BOMB_STEP_SECONDS });
+  assert.ok(bombFlameCells(first, game.time).some(cell => key(cell) === '0:5:3'));
+  assert.ok(bombFlameCells(second, game.time).some(cell => key(cell) === '0:5:3'));
+  assert.equal(game.dangerMap().get('0:3:3'), 0.1);
+  assert.equal(game.dangerMap().get('0:6:4'), 0.1);
+});
+
+test('placing a bomb in existing fire ignites it regardless of its owner', () => {
+  for (let owner = 0; owner < 6; owner++) {
+    const game = emptyGame();
+    const actor = game.players[owner];
+    actor.protectedUntil = 100;
+    game.flames.push({ face: actor.face, x: actor.x, y: actor.y, ttl: 1 });
+    assert.equal(game.placeBomb(owner), true);
+    assert.equal(game.dangerMap().get(tileKey(actor.face, actor.x + 1, actor.y)), 0);
+    game.update(0.01);
+    assert.equal(game.bombs.length, 0);
+    assert.equal(game.events.filter(event => event.type === 'explode').length, 1);
+  }
+});
+
+test('flame collision cells follow eased movement with inclusive20% entry and80% exit grace', () => {
+  const source = { face: 0, x: 3, y: 3 };
+  const destination = { face: 0, x: 4, y: 3 };
+  const actor = { ...destination, previous: source, movedAt: 10, stepDuration: 0.3 };
+  for (const [fraction, expected] of [[0, [source]], [0.2, [source]], [0.2001, [source, destination]], [0.5, [source, destination]], [0.7999, [source, destination]], [0.8, [destination]], [1, [destination]]]) {
+    const time = actor.movedAt + inverseSmooth(fraction) * actor.stepDuration;
+    assert.ok(Math.abs(movementProgress(actor, time) - fraction) < 1e-12);
+    assert.deepEqual(flameVulnerableCells(actor, time), expected);
+  }
+  assert.equal(movementProgress(actor, 9), 0);
+  assert.equal(movementProgress(actor, 11), 1);
+  assert.deepEqual(flameVulnerableCells({ ...actor, previous: destination }, 10), [destination]);
+  assert.deepEqual(flameVulnerableCells({ ...actor, stepDuration: 0 }, 10), [destination]);
+  assert.deepEqual(flameVulnerableCells(destination, 10), [destination]);
+});
+
+test('entering fire is initially safe, but becomes lethal after20% of the visible step', () => {
+  for (const actorId of [0, 1]) {
+    const game = emptyGame();
+    const actor = game.players[actorId];
+    game.flames.push({ face: actor.face, x: actor.x + 1, y: actor.y, ttl: 1 });
+    assert.equal(game.move(actorId, 1), true);
+    assert.equal(actor.alive, true);
+    game.time = actor.movedAt + inverseSmooth(0.2) * actor.stepDuration;
+    game.checkFlameDeaths();
+    assert.equal(actor.alive, true);
+    game.time = actor.movedAt + inverseSmooth(0.2001) * actor.stepDuration;
+    game.checkFlameDeaths();
+    assert.equal(actor.alive, false);
+  }
+});
+
+test('source fire can kill during a step but no longer reaches an actor from80% onward', () => {
+  for (const [fraction, survives] of [[0.7999, false], [0.8, true], [0.99, true], [1, true]]) {
+    const game = emptyGame();
+    const actor = game.players[0];
+    const source = { face: actor.face, x: actor.x, y: actor.y };
+    game.move(0, 1);
+    game.time = actor.movedAt + inverseSmooth(fraction) * actor.stepDuration;
+    game.flames.push({ ...source, ttl: 1 });
+    game.checkFlameDeaths();
+    assert.equal(actor.alive, survives);
+  }
+  const game = emptyGame();
+  const actor = game.players[0];
+  game.move(0, 1);
+  game.time = actor.movedAt + actor.stepDuration / 2;
+  game.flames.push({ ...actor.previous, ttl: 1 }, { face: actor.face, x: actor.x, y: actor.y, ttl: 1 });
+  game.checkFlameDeaths();
+  assert.equal(actor.alive, false);
+});
+
+test('collecting a speed bonus does not retroactively accelerate the current visible step', () => {
+  const game = emptyGame();
+  const actor = game.players[0];
+  game.bonuses.push({ face: actor.face, x: actor.x + 1, y: actor.y, type: 'speed' });
+  game.move(0, 1);
+  assert.equal(actor.speed, 2);
+  assert.equal(actor.stepDuration, 0.3);
+  assert.equal(movementProgress(actor, actor.movedAt + 0.15), 0.5);
+  game.update(0.3);
+  assert.equal(game.move(0, 1), true);
+  assert.equal(actor.stepDuration, 0.3 / 1.07);
+});
 
 test('all 1536 surface steps are reciprocal, in bounds, and physically continuous', () => {
   for (const face of FACES) for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) for (let dir = 0; dir < 4; dir++) {
@@ -190,14 +467,18 @@ test('sliding bombs rotate on edges and stop before obstacles', () => {
   assert.ok(Math.abs(placed.fuse - (2.7 - BOMB_STEP_SECONDS)) < 1e-8);
 });
 
-test('a kicked bomb meeting existing fire detonates immediately without waiting for its fuse', () => {
+test('a kicked bomb ignites when its visible body reaches existing fire without waiting for its fuse', () => {
   const game = emptyGame();
   position(game.players[0], 0, 2, 3);
   bomb(game, 0, 3, 3, 1, 2.7);
   game.flames.push({ face: 0, x: 4, y: 3, ttl: 0.75 });
   assert.equal(game.move(0, 1), true);
-  assert.equal(game.dangerMap().get('0:4:2'), 0);
+  assert.equal(game.dangerMap().get('0:3:2'), 2.7);
   game.update(0.05);
+  assert.equal(game.bombs.length, 1);
+  game.time = 0.1;
+  assert.equal(game.dangerMap().get('0:3:2'), 0);
+  game.update(0.01);
   assert.equal(game.bombs.length, 0);
   assert.ok(game.events.some(event => event.type === 'explode'));
 });
@@ -332,7 +613,45 @@ test('the remaining human wins when all bots have been eliminated', () => {
   game.players.slice(1).forEach(actor => { actor.alive = false; });
   game.update(0.05);
   assert.equal(game.status, 'won');
+  assert.equal(game.players[0].place, 1);
   assert.deepEqual(game.events.at(-1), { type: 'end', status: 'won' });
+});
+
+test('the first human death is sixth place and reset clears recorded places', () => {
+  const game = emptyGame();
+  assert.ok(game.players.every(actor => actor.place === null));
+  game.flames.push({ face: 0, x: 3, y: 3, ttl: 1 });
+  game.update(0.05);
+  assert.equal(game.players[0].place, 6);
+  assert.equal(game.events.find(event => event.type === 'death').place, 6);
+  game.reset();
+  assert.ok(game.players.every(actor => actor.place === null));
+});
+
+test('human placement follows death order and stays fixed while others die during the animation', () => {
+  const game = emptyGame();
+  game.flames.push({ face: 1, x: 3, y: 3, ttl: 1 });
+  game.update(0.05);
+  assert.equal(game.players[1].place, 6);
+  game.flames.push({ face: 0, x: 3, y: 3, ttl: 1 });
+  game.update(0.05);
+  assert.equal(game.players[0].place, 5);
+  game.flames.push({ face: 2, x: 3, y: 3, ttl: 1 });
+  game.update(0.05);
+  assert.equal(game.players[2].place, 4);
+  assert.equal(game.players[0].place, 5);
+});
+
+test('simultaneous deaths share the pre-explosion place and never create a dead first-place winner', () => {
+  for (const aliveCount of [2, 6]) {
+    const game = emptyGame();
+    game.players.slice(aliveCount).forEach(actor => { actor.alive = false; });
+    game.flames = game.players.slice(0, aliveCount).map(actor => ({ face: actor.face, x: actor.x, y: actor.y, ttl: 1 }));
+    game.update(0.05);
+    assert.equal(game.status, 'lost');
+    assert.ok(game.players.slice(0, aliveCount).every(actor => actor.place === aliveCount));
+    assert.ok(game.players.every(actor => actor.place !== 1));
+  }
 });
 
 test('bots traverse faces, plant bombs, and avoid immediately killing themselves', () => {
