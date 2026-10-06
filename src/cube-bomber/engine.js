@@ -1,7 +1,9 @@
 export const SIZE = 8;
 export const BOMB_STEP_SECONDS = 1 / 3;
-export const FACE_COLLAPSE_INTERVAL = 120;
+export const FACE_COLLAPSE_INTERVAL = 60;
 export const FACE_COLLAPSE_WARNING = 10;
+export const FACE_SHRINK_INTERVAL = 30;
+export const FACE_SHRINK_WARNING = 10;
 export const FACES = [
   { id: 0, name: 'Верх', n: [0, 1, 0], u: [1, 0, 0], v: [0, 0, 1] },
   { id: 1, name: 'Фронт', n: [0, 0, 1], u: [1, 0, 0], v: [0, -1, 0] },
@@ -17,6 +19,7 @@ const dot = (a, b) => a.reduce((sum, value, i) => sum + value * b[i], 0);
 const direction = (face, dir) => (dir % 2 ? face.u : face.v).map(value => value * (dir === 0 || dir === 3 ? -1 : 1));
 export const tileKey = (face, x, y) => `${face}:${x}:${y}`;
 const keyOf = cell => tileKey(cell.face, cell.x, cell.y);
+const withinBounds = (cell, bounds) => cell.x >= bounds.minX && cell.x <= bounds.maxX && cell.y >= bounds.minY && cell.y <= bounds.maxY;
 
 /** Physical progress shared with the renderer, using the duration fixed at takeoff. */
 export function movementProgress(actor, time) {
@@ -82,8 +85,10 @@ function seededRandom(seed) {
 }
 
 export class Game {
-  constructor({ seed = Date.now(), bots = true } = {}) {
+  constructor({ seed = Date.now(), bots = true, humanIds = [0], multiplayer = false } = {}) {
     this.botsEnabled = bots;
+    this.humanIds = new Set(humanIds);
+    this.multiplayer = multiplayer;
     this.reset(seed);
   }
 
@@ -92,12 +97,18 @@ export class Game {
     this.random = seededRandom(seed);
     this.time = 0;
     this.status = 'playing';
+    this.winnerId = null;
+    this.endedAt = null;
     this.bombs = [];
     this.flames = [];
     this.bonuses = [];
     this.events = [];
     this.collapsedFaces = new Set();
     this.faceCollapses = new Map();
+    this.faceBounds = FACES.map(() => ({ minX: 0, maxX: SIZE - 1, minY: 0, maxY: SIZE - 1 }));
+    this.nextShrink = null;
+    this.shrinkHistory = [];
+    this.shrinkWarningIssued = false;
     this.nextCollapse = null;
     this.collapseWarningIssued = false;
     this.nextBombId = 1;
@@ -126,16 +137,31 @@ export class Game {
   moveDuration(actor) { return 0.3 / (1 + (actor.speed - 1) * 0.07); }
 
   isRunning() {
+    if (this.multiplayer) return this.status === 'playing';
     return this.status === 'playing' || (this.status === 'lost' && this.players[0].diedAt !== null && this.time < this.players[0].diedAt + 3 - 1e-9);
   }
 
   isFaceActive(face) { return Boolean(FACES[face]) && !this.collapsedFaces.has(face); }
 
+  isCellActive(cell) { return this.isFaceActive(cell.face) && withinBounds(cell, this.faceBounds[cell.face]); }
+
+  cellsOutsideBounds(face, bounds) {
+    const cells = [];
+    for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+      const cell = { face, x, y };
+      if (this.isCellActive(cell) && !withinBounds(cell, bounds)) cells.push(cell);
+    }
+    return cells;
+  }
+
   scheduleCollapse(previousFace, at) {
     const active = FACES.filter(face => this.isFaceActive(face.id)).map(face => face.id);
     this.nextCollapse = null;
     this.collapseWarningIssued = false;
-    if (active.length <= 1) return;
+    if (active.length <= 1) {
+      if (active.length === 1 && !this.nextShrink && this.shrinkHistory.length === 0) this.scheduleShrink(active[0], this.time + FACE_SHRINK_INTERVAL, 1);
+      return;
+    }
     const adjacent = (a, b) => dot(FACES[a].n, FACES[b].n) === 0;
     const candidates = active.filter(candidate => {
       if (previousFace !== null && !adjacent(previousFace, candidate)) return false;
@@ -150,7 +176,7 @@ export class Game {
     if (candidates.length) this.nextCollapse = { face: candidates[Math.floor(this.random() * candidates.length)], at };
   }
 
-  returnFromCollapsedFace(entity, isActor) {
+  returnFromCollapsedFace(entity, isActor, cause = 'collapse') {
     const from = { face: entity.face, x: entity.x, y: entity.y };
     const to = { ...entity.previous };
     const backwards = [0, 1, 2, 3].find(dir => keyOf(neighbor(entity.face, entity.x, entity.y, dir)) === keyOf(to));
@@ -161,7 +187,7 @@ export class Game {
     if (isActor) {
       entity.stepDuration = 0;
       entity.moveCooldown = 0;
-      this.events.push({ type: 'collapse-return', id: entity.id, from, to, previousDir, dir: entity.dir });
+      this.events.push({ type: 'collapse-return', id: entity.id, from, to, previousDir, dir: entity.dir, cause });
     } else {
       entity.moving = false;
       entity.moveAccumulator = 0;
@@ -170,37 +196,66 @@ export class Game {
 
   collapseFace(face) {
     if (!this.isFaceActive(face) || this.collapsedFaces.size >= FACES.length - 1) return false;
-    const victims = this.players.filter(actor => actor.alive && flameVulnerableCells(actor, this.time).some(cell => cell.face === face));
+    const cells = this.cellsOutsideBounds(face, { minX: SIZE, maxX: SIZE, minY: SIZE, maxY: SIZE });
     this.collapsedFaces.add(face);
     this.faceCollapses.set(face, this.time);
-    this.grid[face] = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
     this.events.push({ type: 'collapse', face });
-    this.killPlayers(victims, 'collapse', actor => flameVulnerableCells(actor, this.time).find(cell => cell.face === face));
-    for (const actor of this.players) {
-      if (actor.alive && actor.face === face && actor.previous && this.isFaceActive(actor.previous.face)) this.returnFromCollapsedFace(actor, true);
-    }
-    this.bombs = this.bombs.filter(bomb => bombExplosionCell(bomb, this.time).face !== face);
-    for (const bomb of this.bombs) {
-      if (bomb.face === face && bomb.previous && this.isFaceActive(bomb.previous.face)) this.returnFromCollapsedFace(bomb, false);
-    }
-    this.bonuses = this.bonuses.filter(bonus => bonus.face !== face);
-    this.flames = this.flames.filter(flame => flame.face !== face);
+    this.removeArenaCells(cells, 'collapse');
     this.scheduleCollapse(face, this.time + FACE_COLLAPSE_INTERVAL);
     this.checkEnd();
     return true;
   }
 
+  removeArenaCells(cells, cause) {
+    const removed = new Set(cells.map(keyOf));
+    for (const cell of cells) this.grid[cell.face][cell.y][cell.x] = 0;
+    const victims = this.players.filter(actor => actor.alive && flameVulnerableCells(actor, this.time).some(cell => removed.has(keyOf(cell))));
+    this.killPlayers(victims, cause, actor => flameVulnerableCells(actor, this.time).find(cell => removed.has(keyOf(cell))));
+    for (const actor of this.players) {
+      if (actor.alive && !this.isCellActive(actor) && actor.previous && this.isCellActive(actor.previous)) this.returnFromCollapsedFace(actor, true, cause);
+    }
+    this.bombs = this.bombs.filter(bomb => this.isCellActive(bombExplosionCell(bomb, this.time)));
+    for (const bomb of this.bombs) {
+      if (!this.isCellActive(bomb) && bomb.previous && this.isCellActive(bomb.previous)) this.returnFromCollapsedFace(bomb, false, cause);
+    }
+    this.bonuses = this.bonuses.filter(bonus => this.isCellActive(bonus));
+    this.flames = this.flames.filter(flame => this.isCellActive(flame));
+  }
+
+  scheduleShrink(face, at, stage) {
+    this.shrinkWarningIssued = false;
+    this.nextShrink = stage > 2 ? null : { face, at, stage, bounds: { minX: stage === 1 ? 0 : 1, maxX: 6, minY: stage === 1 ? 0 : 1, maxY: 6 } };
+  }
+
+  shrinkFace(face, bounds, stage = 1) {
+    if (!this.isFaceActive(face) || this.collapsedFaces.size !== FACES.length - 1) return false;
+    const cells = this.cellsOutsideBounds(face, bounds);
+    if (!cells.length) return false;
+    this.faceBounds[face] = { ...bounds };
+    const entry = { face, at: this.time, cells, bounds: { ...bounds } };
+    this.shrinkHistory.push(entry);
+    this.events.push({ type: 'shrink', face, cells, bounds: { ...bounds }, stage });
+    this.removeArenaCells(cells, 'shrink');
+    this.scheduleShrink(face, this.time + FACE_SHRINK_INTERVAL, stage + 1);
+    this.checkEnd();
+    return true;
+  }
+
   updateCollapseSchedule() {
-    if (!this.nextCollapse) return;
-    if (!this.collapseWarningIssued && this.time >= this.nextCollapse.at - FACE_COLLAPSE_WARNING - 1e-9) {
+    if (this.nextCollapse && !this.collapseWarningIssued && this.time >= this.nextCollapse.at - FACE_COLLAPSE_WARNING - 1e-9) {
       this.collapseWarningIssued = true;
       this.events.push({ type: 'collapse-warning', ...this.nextCollapse });
     }
-    if (this.time >= this.nextCollapse.at - 1e-9) this.collapseFace(this.nextCollapse.face);
+    if (this.nextCollapse && this.time >= this.nextCollapse.at - 1e-9) this.collapseFace(this.nextCollapse.face);
+    if (this.nextShrink && !this.shrinkWarningIssued && this.time >= this.nextShrink.at - FACE_SHRINK_WARNING - 1e-9) {
+      this.shrinkWarningIssued = true;
+      this.events.push({ type: 'shrink-warning', ...this.nextShrink, cells: this.cellsOutsideBounds(this.nextShrink.face, this.nextShrink.bounds) });
+    }
+    if (this.nextShrink && this.time >= this.nextShrink.at - 1e-9) this.shrinkFace(this.nextShrink.face, this.nextShrink.bounds, this.nextShrink.stage);
   }
 
   canEnter(cell) {
-    return this.isFaceActive(cell.face) && this.grid[cell.face][cell.y][cell.x] === 0 && !this.bombs.some(bomb => keyOf(bomb) === keyOf(cell));
+    return this.isCellActive(cell) && this.grid[cell.face][cell.y][cell.x] === 0 && !this.bombs.some(bomb => keyOf(bomb) === keyOf(cell));
   }
 
   canBombEnter(cell) {
@@ -221,12 +276,12 @@ export class Game {
 
   move(actorId, dir) {
     const actor = this.players.find(player => player.id === actorId);
-    if (!actor || !actor.alive || !this.isRunning() || !this.isFaceActive(actor.face) || actor.moveCooldown > 0.0001 || !Number.isInteger(dir) || dir < 0 || dir > 3) return false;
+    if (!actor || !actor.alive || !this.isRunning() || !this.isCellActive(actor) || actor.moveCooldown > 0.0001 || !Number.isInteger(dir) || dir < 0 || dir > 3) return false;
     // The camera transports the input tangent, not the previous facing direction.
     const previousDir = dir;
     actor.dir = dir;
     const next = neighbor(actor.face, actor.x, actor.y, dir);
-    if (!this.isFaceActive(next.face)) return false;
+    if (!this.isCellActive(next)) return false;
     if (!this.canEnter(next)) {
       const bomb = this.bombs.find(candidate => keyOf(candidate) === keyOf(next));
       if (!bomb || bomb.owner !== actor.id || this.grid[next.face][next.y][next.x] !== 0) return false;
@@ -255,7 +310,7 @@ export class Game {
 
   placeBomb(actorId) {
     const actor = this.players.find(player => player.id === actorId);
-    if (!actor || !actor.alive || !this.isRunning() || !this.isFaceActive(actor.face) || this.bombs.some(bomb => keyOf(bomb) === keyOf(actor)) || this.bombs.filter(bomb => bomb.owner === actorId).length >= actor.capacity) return false;
+    if (!actor || !actor.alive || !this.isRunning() || !this.isCellActive(actor) || this.bombs.some(bomb => keyOf(bomb) === keyOf(actor)) || this.bombs.filter(bomb => bomb.owner === actorId).length >= actor.capacity) return false;
     const bomb = { id: this.nextBombId++, owner: actorId, face: actor.face, x: actor.x, y: actor.y, range: actor.range, fuse: 2.7, moving: false, moveAccumulator: 0 };
     this.bombs.push(bomb);
     this.events.push({ type: 'bomb', ...bomb });
@@ -264,15 +319,15 @@ export class Game {
 
   blastCells(bomb) {
     const origin = bombExplosionCell(bomb, this.time);
-    if (!this.isFaceActive(origin.face)) return [];
+    if (!this.isCellActive(origin)) return [];
     const cells = [origin];
     const seen = new Set([keyOf(origin)]);
-    const blockers = new Set(this.bombs.filter(other => other.id !== bomb.id).flatMap(other => bombFlameCells(other, this.time).filter(cell => this.isFaceActive(cell.face)).map(keyOf)));
+    const blockers = new Set(this.bombs.filter(other => other.id !== bomb.id).flatMap(other => bombFlameCells(other, this.time).filter(cell => this.isCellActive(cell)).map(keyOf)));
     for (let dir = 0; dir < 4; dir++) {
       let cell = { ...origin, dir };
       for (let distance = 0; distance < bomb.range; distance++) {
         cell = neighbor(cell.face, cell.x, cell.y, cell.dir);
-        if (!this.isFaceActive(cell.face)) break;
+        if (!this.isCellActive(cell)) break;
         const tile = this.grid[cell.face][cell.y][cell.x];
         if (tile === 1) break;
         const key = keyOf(cell);
@@ -287,12 +342,12 @@ export class Game {
   /** Earliest arrival of fire, including chain reactions. Active flames have time zero. */
   dangerMap() {
     const result = new Map();
-    const burning = new Set(this.flames.filter(flame => this.isFaceActive(flame.face)).map(keyOf));
+    const burning = new Set(this.flames.filter(flame => this.isCellActive(flame)).map(keyOf));
     const times = this.bombs.map(bomb => bombFlameCells(bomb, this.time).some(cell => burning.has(keyOf(cell))) ? 0 : Math.max(0, bomb.fuse));
     const rays = this.bombs.map(bomb => this.blastCells(bomb));
     const bombIndices = new Map();
     this.bombs.forEach((bomb, i) => bombFlameCells(bomb, this.time).forEach(cell => {
-      if (!this.isFaceActive(cell.face)) return;
+      if (!this.isCellActive(cell)) return;
       const key = keyOf(cell);
       if (!bombIndices.has(key)) bombIndices.set(key, []);
       bombIndices.get(key).push(i);
@@ -310,11 +365,18 @@ export class Game {
       const key = keyOf(cell);
       result.set(key, Math.min(result.get(key) ?? Infinity, times[i]));
     }));
-    this.flames.filter(flame => this.isFaceActive(flame.face)).forEach(flame => result.set(keyOf(flame), 0));
+    this.flames.filter(flame => this.isCellActive(flame)).forEach(flame => result.set(keyOf(flame), 0));
     if (this.nextCollapse && this.nextCollapse.at - this.time <= FACE_COLLAPSE_WARNING + 1e-9) {
       const remaining = Math.max(0, this.nextCollapse.at - this.time);
       for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
         const key = tileKey(this.nextCollapse.face, x, y);
+        result.set(key, Math.min(result.get(key) ?? Infinity, remaining));
+      }
+    }
+    if (this.nextShrink && this.nextShrink.at - this.time <= FACE_SHRINK_WARNING + 1e-9) {
+      const remaining = Math.max(0, this.nextShrink.at - this.time);
+      for (const cell of this.cellsOutsideBounds(this.nextShrink.face, this.nextShrink.bounds)) {
+        const key = keyOf(cell);
         result.set(key, Math.min(result.get(key) ?? Infinity, remaining));
       }
     }
@@ -370,15 +432,30 @@ export class Game {
   }
 
   checkFlameDeaths() {
-    const burning = new Set(this.flames.filter(flame => this.isFaceActive(flame.face)).map(keyOf));
+    const burning = new Set(this.flames.filter(flame => this.isCellActive(flame)).map(keyOf));
     this.killPlayers(this.players.filter(actor => actor.alive && this.time >= actor.protectedUntil && flameVulnerableCells(actor, this.time).some(cell => burning.has(keyOf(cell)))));
   }
 
   checkEnd() {
     if (this.status !== 'playing') return;
+    if (this.multiplayer) {
+      const living = this.players.filter(player => player.alive);
+      if (living.length <= 1) {
+        this.status = 'finished';
+        this.winnerId = living[0]?.id ?? null;
+        this.endedAt = this.time;
+        if (living[0]) living[0].place = 1;
+        this.events.push({ type: 'end', status: this.status, winnerId: this.winnerId, endedAt: this.endedAt });
+      }
+      return;
+    }
     if (!this.players[0].alive) { this.players[0].diedAt ??= this.time; this.status = 'lost'; }
     else if (this.players.filter(player => player.alive).length === 1) { this.status = 'won'; this.players[0].place = 1; }
-    if (this.status !== 'playing') this.events.push({ type: 'end', status: this.status });
+    if (this.status !== 'playing') {
+      this.endedAt = this.time;
+      this.winnerId = this.status === 'won' ? 0 : null;
+      this.events.push({ type: 'end', status: this.status });
+    }
   }
 
   /** Find the quickest surface route, including remaining and edge-crossing cooldowns. */
@@ -431,7 +508,9 @@ export class Game {
       const currentDanger = danger.get(keyOf(actor));
       const cover = this.findPath(actor, danger, cell => (danger.get(keyOf(cell)) ?? Infinity) > currentDanger + 0.85, { escape: true, maxDepth: 12 });
       if (cover) { this.move(actor.id, cover.firstDir); return; }
-      const warning = this.nextCollapse?.face === actor.face && this.nextCollapse.at - this.time > 3.6;
+      const collapseWarning = this.nextCollapse?.face === actor.face && this.nextCollapse.at - this.time <= FACE_COLLAPSE_WARNING && this.nextCollapse.at - this.time > 3.6;
+      const shrinkWarning = this.nextShrink?.face === actor.face && !withinBounds(actor, this.nextShrink.bounds) && this.nextShrink.at - this.time <= FACE_SHRINK_WARNING && this.nextShrink.at - this.time > 3.6;
+      const warning = collapseWarning || shrinkWarning;
       if (warning && actor.bombCooldown <= 0 && this.bombs.filter(bomb => bomb.owner === actor.id).length < actor.capacity) {
         const preview = this.blastCells({ id: -1, face: actor.face, x: actor.x, y: actor.y, range: actor.range });
         if (preview.some(cell => this.grid[cell.face][cell.y][cell.x] === 2) && this.canEscapeBomb(actor) && this.placeBomb(actor.id)) {
@@ -482,13 +561,15 @@ export class Game {
       if (running) { this.updateCollapseSchedule(); running = this.isRunning(); }
       const untilDeathEnds = this.status === 'lost' && running ? this.players[0].diedAt + 3 - this.time : Infinity;
       const collapseBoundary = this.nextCollapse ? (this.collapseWarningIssued ? this.nextCollapse.at : this.nextCollapse.at - FACE_COLLAPSE_WARNING) : Infinity;
-      const untilCollapseBoundary = running && collapseBoundary - this.time > 1e-9 ? collapseBoundary - this.time : Infinity;
+      const shrinkBoundary = this.nextShrink ? (this.shrinkWarningIssued ? this.nextShrink.at : this.nextShrink.at - FACE_SHRINK_WARNING) : Infinity;
+      const boundary = Math.min(collapseBoundary, shrinkBoundary);
+      const untilCollapseBoundary = running && boundary - this.time > 1e-9 ? boundary - this.time : Infinity;
       const step = Math.min(remaining, 0.05, untilDeathEnds, untilCollapseBoundary);
       remaining -= step;
       this.time += step;
       if (!running) continue;
       this.updateCollapseSchedule();
-      if (this.status === 'won') continue;
+      if (this.status === 'won' || this.status === 'finished') continue;
       for (const actor of this.players) {
         actor.moveCooldown = Math.max(0, actor.moveCooldown - step);
         actor.bombCooldown = Math.max(0, actor.bombCooldown - step);
@@ -515,7 +596,8 @@ export class Game {
       this.checkFlameDeaths();
       this.checkEnd();
       if (this.botsEnabled && this.isRunning()) {
-        for (const actor of this.players.slice(1)) {
+        for (const actor of this.players) {
+          if (this.humanIds.has(actor.id)) continue;
           if (!actor.alive || actor.moveCooldown > 0.0001 || actor.botThink > 0) continue;
           this.thinkBot(actor);
           actor.botThink = this.moveDuration(actor) * (0.85 + this.random() * 0.15);

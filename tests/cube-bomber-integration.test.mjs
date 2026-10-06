@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Game, FACES, SIZE, neighbor, tileKey, movementProgress, flameVulnerableCells } from '../src/cube-bomber/engine.js';
+import { Game, FACES, SIZE, FACE_COLLAPSE_INTERVAL, neighbor, tileKey, movementProgress, flameVulnerableCells } from '../src/cube-bomber/engine.js';
 
 const key = cell => tileKey(cell.face, cell.x, cell.y);
 const oppositeFace = [5, 3, 4, 1, 2, 0];
@@ -299,7 +299,7 @@ test('scheduled collapses warn ten seconds early, follow neighboring faces, and 
     let previousFace = null;
     for (let collapseIndex = 0; collapseIndex < 5; collapseIndex++) {
       const scheduled = { ...game.nextCollapse };
-      assert.ok(Math.abs(scheduled.at - (collapseIndex + 1) * 120) < 1e-8);
+      assert.ok(Math.abs(scheduled.at - (collapseIndex + 1) * FACE_COLLAPSE_INTERVAL) < 1e-8);
       assert.ok(game.isFaceActive(scheduled.face));
       if (previousFace !== null) assert.ok(adjacentFaces(previousFace).has(scheduled.face));
       const safeFace = FACES.find(face => game.isFaceActive(face.id) && face.id !== scheduled.face).id;

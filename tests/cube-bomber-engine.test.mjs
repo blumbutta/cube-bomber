@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SIZE, BOMB_STEP_SECONDS, FACE_COLLAPSE_INTERVAL, FACE_COLLAPSE_WARNING, FACES, Game, neighbor, tileKey, worldPoint, movementProgress, flameVulnerableCells, bombFlameCells, bombExplosionCell } from '../src/cube-bomber/engine.js';
+import { SIZE, BOMB_STEP_SECONDS, FACE_COLLAPSE_INTERVAL, FACE_COLLAPSE_WARNING, FACE_SHRINK_INTERVAL, FACE_SHRINK_WARNING, FACES, Game, neighbor, tileKey, worldPoint, movementProgress, flameVulnerableCells, bombFlameCells, bombExplosionCell } from '../src/cube-bomber/engine.js';
 
 const key = cell => tileKey(cell.face, cell.x, cell.y);
 function emptyGame(options = {}) {
@@ -19,26 +19,199 @@ function position(actor, face, x, y) { Object.assign(actor, { face, x, y, previo
 const inverseSmooth = progress => 0.5 - Math.sin(Math.asin(1 - 2 * progress) / 3);
 const adjacentFaces = (a, b) => FACES[a].n.reduce((sum, value, i) => sum + value * FACES[b].n[i], 0) === 0;
 
-test('collapse warns exactly10seconds before120, happens once, and clears the danger warning', () => {
+function finalArena(options = {}) {
+  const game = emptyGame(options);
+  game.players.forEach(actor => position(actor, 0, 3, 3));
+  for (let face = 1; face < 6; face++) game.collapseFace(face);
+  game.events.length = 0;
+  return game;
+}
+
+test('the final face shrinks after30seconds to7×7, then after30more to centered6×6 permanently', () => {
+  const game = finalArena();
+  assert.equal(FACE_SHRINK_INTERVAL, 30);
+  assert.equal(FACE_SHRINK_WARNING, 10);
+  assert.deepEqual(game.nextShrink, { face: 0, at: 30, stage: 1, bounds: { minX: 0, maxX: 6, minY: 0, maxY: 6 } });
+  game.update(19.999);
+  assert.equal(game.events.filter(event => event.type === 'shrink-warning').length, 0);
+  game.update(0.001);
+  const firstWarning = game.events.find(event => event.type === 'shrink-warning');
+  assert.equal(firstWarning.cells.length, 15);
+  assert.ok(firstWarning.cells.every(cell => cell.x === 7 || cell.y === 7));
+  assert.ok(Math.abs(game.dangerMap().get('0:7:3') - 10) < 1e-8);
+  assert.equal(game.dangerMap().has('0:3:3'), false);
+  game.update(9.999);
+  assert.equal(game.faceBounds[0].maxX, 7);
+  game.update(0.001);
+  assert.deepEqual(game.faceBounds[0], { minX: 0, maxX: 6, minY: 0, maxY: 6 });
+  assert.equal(game.shrinkHistory[0].cells.length, 15);
+  assert.ok(Math.abs(game.shrinkHistory[0].at - 30) < 1e-8);
+  assert.ok(Math.abs(game.nextShrink.at - 60) < 1e-8);
+  assert.equal(game.nextShrink.stage, 2);
+  game.update(20);
+  const warnings = game.events.filter(event => event.type === 'shrink-warning');
+  assert.equal(warnings.length, 2);
+  assert.equal(warnings[1].cells.length, 13);
+  assert.ok(warnings[1].cells.every(cell => cell.x === 0 || cell.y === 0));
+  assert.ok(Math.abs(game.dangerMap().get('0:0:3') - 10) < 1e-8);
+  assert.equal(game.dangerMap().has('0:6:3'), false);
+  game.update(10);
+  assert.deepEqual(game.faceBounds[0], { minX: 1, maxX: 6, minY: 1, maxY: 6 });
+  assert.equal(game.nextShrink, null);
+  assert.equal(game.shrinkHistory.length, 2);
+  const liveCells = [];
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) if (game.isCellActive({ face: 0, x, y })) liveCells.push({ x, y });
+  assert.equal(liveCells.length, 36);
+  game.update(300);
+  assert.equal(game.shrinkHistory.length, 2);
+  assert.equal(game.events.filter(event => event.type === 'shrink').length, 2);
+  game.reset();
+  assert.equal(game.nextShrink, null);
+  assert.deepEqual(game.shrinkHistory, []);
+  assert.ok(game.faceBounds.every(bounds => bounds.minX === 0 && bounds.maxX === 7 && bounds.minY === 0 && bounds.maxY === 7));
+});
+
+test('both shrinking boundaries apply20% entry and80% exit grace to each removed row and column', () => {
+  const boundsByStage = [{ minX: 0, maxX: 6, minY: 0, maxY: 6 }, { minX: 1, maxX: 6, minY: 1, maxY: 6 }];
+  for (const stage of [1, 2]) for (const axis of ['x', 'y']) for (const [entering, fraction, survives] of [[true, 0.2, true], [true, 0.2001, false], [false, 0.7999, false], [false, 0.8, true]]) {
+    const game = finalArena();
+    if (stage === 2) game.shrinkFace(0, boundsByStage[0], 1);
+    const actor = game.players[0];
+    const removed = stage === 1 ? 7 : 0;
+    const safe = stage === 1 ? 6 : 1;
+    const start = entering ? safe : removed;
+    position(actor, 0, axis === 'x' ? start : 3, axis === 'y' ? start : 3);
+    const positive = entering === (stage === 1);
+    const dir = axis === 'x' ? (positive ? 1 : 3) : (positive ? 2 : 0);
+    game.move(0, dir);
+    game.time = actor.movedAt + inverseSmooth(fraction) * actor.stepDuration;
+    game.shrinkFace(0, boundsByStage[stage - 1], stage);
+    assert.equal(actor.alive, survives);
+    if (survives) assert.equal(game.isCellActive(actor), true);
+    else {
+      const event = game.events.find(event => event.type === 'death' && event.id === 0);
+      assert.equal(event.cause, 'shrink');
+      assert.equal(event[axis], removed);
+    }
+  }
+});
+
+test('removed shrink cells block actors, kicks, flames and paths and remove their contents', () => {
+  const game = finalArena();
+  const removed = bomb(game, 0, 7, 3, 1, 9, 1);
+  const kept = bomb(game, 0, 6, 5, 3, 9, 2);
+  game.bonuses.push({ face: 0, x: 7, y: 2, type: 'range' }, { face: 0, x: 5, y: 2, type: 'bomb' });
+  game.flames.push({ face: 0, x: 7, y: 1, ttl: 1 });
+  game.shrinkFace(0, game.nextShrink.bounds, 1);
+  assert.deepEqual(game.bombs, [kept]);
+  assert.equal(game.bonuses.length, 1);
+  assert.equal(game.flames.length, 0);
+  assert.deepEqual(game.blastCells(removed), []);
+  assert.ok(game.blastCells(kept).every(cell => game.isCellActive(cell)));
+  position(game.players[0], 0, 6, 3);
+  assert.equal(game.move(0, 1), false);
+  assert.equal(game.findPath(game.players[0], new Map(), cell => cell.x === 7), null);
+  position(game.players[0], 0, 5, 3);
+  const edgeBomb = bomb(game, 0, 6, 3, 1, 9, 0);
+  assert.equal(game.move(0, 1), false);
+  assert.equal(edgeBomb.x, 6);
+  position(game.players[1], 0, 7, 4);
+  assert.equal(game.placeBomb(1), false);
+});
+
+test('a shrink warning sends a bot away from the doomed outer strip', () => {
+  const game = finalArena({ bots: true });
+  game.players.forEach(actor => { actor.botThink = 1000; actor.protectedUntil = 1000; });
+  position(game.players[1], 0, 7, 3);
+  game.players[1].botThink = 0;
+  game.nextShrink.at = 10;
+  game.update(1);
+  assert.ok(game.players[1].x <= 6 && game.players[1].y <= 6);
+  assert.ok(game.events.some(event => event.type === 'move' && event.id === 1 && event.from.x === 7 && event.to.x === 6));
+});
+
+test('six human-controlled slots never run bot AI', () => {
+  const game = emptyGame({ bots: true, multiplayer: true, humanIds: [0, 1, 2, 3, 4, 5] });
+  game.update(5);
+  assert.ok(!game.events.some(event => event.type === 'move' || event.type === 'bomb'));
+  assert.ok(game.players.every(actor => actor.face === actor.id && actor.x === 3 && actor.y === 3));
+});
+
+test('multiplayer continues after player0 dies and another human can still play', () => {
+  const game = emptyGame({ bots: true, multiplayer: true, humanIds: [0, 2] });
+  game.players.forEach(actor => actor.botThink = 1000);
+  game.players[2].protectedUntil = 100;
+  game.flames.push({ face: 0, x: 3, y: 3, ttl: 1 });
+  game.update(0.05);
+  assert.equal(game.players[0].alive, false);
+  assert.equal(game.status, 'playing');
+  assert.equal(game.endedAt, null);
+  assert.equal(game.move(2, 1), true);
+  assert.equal(game.placeBomb(2), true);
+  game.update(4);
+  assert.equal(game.isRunning(), true);
+  assert.equal(game.move(2, 2), true);
+});
+
+test('human slot changes immediately enable or disable its bot, including slot0', () => {
+  const game = emptyGame({ bots: true, multiplayer: true, humanIds: [1, 2, 3, 4, 5] });
+  game.players[0].botThink = 0;
+  game.update(0.05);
+  assert.ok(game.events.some(event => event.type === 'move' && event.id === 0));
+  game.humanIds = new Set([0, 1, 2, 3, 4, 5]);
+  game.events.length = 0;
+  game.players[0].botThink = 0;
+  game.players[0].moveCooldown = 0;
+  game.update(1);
+  assert.ok(!game.events.some(event => event.type === 'move' || event.type === 'bomb'));
+});
+
+test('multiplayer records any surviving winner or a simultaneous draw, then freezes gameplay', () => {
+  for (const winner of [3, null]) {
+    const game = emptyGame({ multiplayer: true, humanIds: [0, 1, 2, 3, 4, 5] });
+    const pending = bomb(game, 3, 0, 0, 1, 9, 3);
+    game.flames = game.players.filter(actor => actor.id !== winner).map(actor => ({ face: actor.face, x: actor.x, y: actor.y, ttl: 1 }));
+    game.update(0.05);
+    assert.equal(game.status, 'finished');
+    assert.equal(game.winnerId, winner);
+    assert.equal(game.endedAt, 0.05);
+    assert.equal(game.isRunning(), false);
+    if (winner !== null) assert.equal(game.players[winner].place, 1);
+    else assert.ok(game.players.every(actor => actor.place === 6));
+    const fuse = pending.fuse;
+    game.update(3);
+    assert.equal(pending.fuse, fuse);
+    assert.equal(game.move(3, 1), false);
+    assert.equal(game.placeBomb(3), false);
+    assert.equal(game.events.filter(event => event.type === 'end').length, 1);
+    game.reset();
+    assert.equal(game.status, 'playing');
+    assert.equal(game.winnerId, null);
+    assert.equal(game.endedAt, null);
+    assert.equal(game.humanIds.size, 6);
+  }
+});
+
+test('collapse warns exactly10seconds before60, happens once, and clears the danger warning', () => {
   const game = emptyGame();
-  assert.equal(FACE_COLLAPSE_INTERVAL, 120);
+  assert.equal(FACE_COLLAPSE_INTERVAL, 60);
   assert.equal(FACE_COLLAPSE_WARNING, 10);
-  assert.equal(game.nextCollapse.at, 120);
+  assert.equal(game.nextCollapse.at, 60);
   const target = game.nextCollapse.face;
   const safe = FACES.find(face => face.id !== target).id;
   game.players.forEach(actor => position(actor, safe, 3, 3));
-  game.update(109.999);
+  game.update(49.999);
   assert.equal(game.events.filter(event => event.type === 'collapse-warning').length, 0);
   assert.equal(game.dangerMap().size, 0);
   game.update(0.001);
-  assert.deepEqual(game.events.find(event => event.type === 'collapse-warning'), { type: 'collapse-warning', face: target, at: 120 });
+  assert.deepEqual(game.events.find(event => event.type === 'collapse-warning'), { type: 'collapse-warning', face: target, at: 60 });
   assert.ok(Math.abs(game.dangerMap().get(tileKey(target, 3, 3)) - 10) < 1e-8);
   game.update(9.999);
   assert.equal(game.collapsedFaces.size, 0);
   game.update(0.001);
   assert.equal(game.isFaceActive(target), false);
-  assert.ok(Math.abs(game.faceCollapses.get(target) - 120) < 1e-8);
-  assert.ok(Math.abs(game.nextCollapse.at - 240) < 1e-8);
+  assert.ok(Math.abs(game.faceCollapses.get(target) - 60) < 1e-8);
+  assert.ok(Math.abs(game.nextCollapse.at - 120) < 1e-8);
   assert.equal(game.dangerMap().size, 0);
   game.update(0.1);
   assert.equal(game.events.filter(event => event.type === 'collapse-warning').length, 1);
