@@ -18,6 +18,13 @@ const game = new Game();
 let playerId=0,onlineActive=false,onlineClient=null,onlineRoom=null,memberId=null,networkRound=-1,networkTick=-1,lastEventId=0;
 let snapshotTime=0,snapshotReceivedAt=0,lastInputAt=-Infinity,lastInputDir=null,onlineResultShown=false,connectionState='offline';
 const localPlayer=()=>game.players[playerId];
+let spectatorId=null,spectatorRosterKey='';
+function spectatedPlayer(){
+  let actor=game.players.find(player=>player.id===spectatorId&&player.alive);
+  if(!actor){actor=game.players.find(player=>player.alive);spectatorId=actor?.id??null;viewTurn=0;}
+  return actor||localPlayer();
+}
+const cameraPlayer=()=>mode==='spectating'?spectatedPlayer():localPlayer();
 const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 let mode = 'intro', helpReturn = 'intro', pauseReturn = 'playing', viewTurn = 0, elapsed = 0, lastHud = 0, cameraTween = 1;
 let soundEnabled = true, flashTime = 0, nextVoice = 7, countdownRemaining = 0, lastCountdownNumber = 0, lastCollapseBeat = null;
@@ -328,7 +335,7 @@ function applyCharacters(){
     const profile=CHARACTERS[id];COLORS[index]=profile.color;
     game.players[index].characterId=id;
     const slot=onlineActive&&onlineRoom?onlineRoom.slots[index]:null;
-    game.players[index].name=`${index===playerId?'Вы · ':slot?.isBot?'Бот · ':''}${slot?.nickname||profile.name}`;
+    game.players[index].name=`${index===playerId?'Вы · ':!onlineActive||slot?.isBot?'🤖 ':''}${slot?.nickname||profile.name}`;
     characters[index].getObjectByName('you').visible=index===playerId;
   });
   document.documentElement.style.setProperty('--player-color',`#${COLORS[playerId].toString(16)}`);
@@ -499,7 +506,7 @@ function turnCamera(face,turn,instant=false) {cameraFrom.copy(cameraCurrent);cam
 turnCamera(0,0,true);
 function updateCamera(dt) {
   cameraTween=Math.min(1,cameraTween+dt/.5);cameraCurrent.slerpQuaternions(cameraFrom,cameraTarget,smooth(cameraTween));
-  const player=mode==='spectating'?(game.players.find(p=>p.alive)||localPlayer()):localPlayer();
+  const player=cameraPlayer();
   if(mode==='spectating'&&cameraTarget.angleTo(desiredFrame(player.face,viewTurn))>.001)turnCamera(player.face,viewTurn);
   const position=poseAt(player).position;
   const target=position.multiplyScalar(mode==='intro'?.025:.13);
@@ -536,7 +543,7 @@ const netPositions=[[1,0],[1,1],[2,1],[3,1],[0,1],[1,2]];
 const mini=$('minimap'),ctx=mini.getContext('2d');
 function drawMinimap() {
   const width=mini.width,height=mini.height,unit=Math.min((width-16)/32,(height-12)/24),faceSize=8*unit;
-  const ox=(width-faceSize*4)/2,oy=(height-faceSize*3)/2,player=localPlayer(),warning=arenaWarning();
+  const ox=(width-faceSize*4)/2,oy=(height-faceSize*3)/2,player=cameraPlayer(),warning=arenaWarning();
   ctx.clearRect(0,0,width,height);
   for(let f=0;f<6;f++) {
     const [nx,ny]=netPositions[f],sx=ox+nx*faceSize,sy=oy+ny*faceSize;
@@ -552,7 +559,7 @@ function drawMinimap() {
       }
       const t=game.grid[f][y][x];if(!t)continue;ctx.fillStyle=t===1?'#46647c':'#f28a48';ctx.fillRect(sx+x*unit+1.2,sy+y*unit+1.2,unit-2,unit-2);
     }
-    ctx.strokeStyle=f===player.face?`#${COLORS[playerId].toString(16)}`:'#304456';ctx.lineWidth=f===player.face?1.5:1;ctx.strokeRect(left+1,top+1,w-2,h-2);
+    ctx.strokeStyle=f===player.face?`#${COLORS[player.id].toString(16)}`:'#304456';ctx.lineWidth=f===player.face?1.5:1;ctx.strokeRect(left+1,top+1,w-2,h-2);
   }
   const dot=(c,color,r=1)=>{
     if(!game.isCellActive(c))return;
@@ -561,7 +568,7 @@ function drawMinimap() {
   for(const b of game.bombs){for(const c of game.blastCells(b))dot(c,'#ed715a66',.8);dot(bombExplosionCell(b,game.time),Math.sin(elapsed*12)>0?'#fff0b0':'#fb724c',.9);}
   for(const b of game.bonuses)dot(b,'#77e9ba',.55);
   for(const c of game.flames)dot(c,'#ffd977',1);
-  for(const p of game.players)if(p.alive)dot(p,`#${COLORS[p.id].toString(16)}`,p.id===playerId?1.18:.9);
+  for(const p of game.players)if(p.alive)dot(p,`#${COLORS[p.id].toString(16)}`,p.id===player.id?1.18:.9);
 }
 function beep(type,id=playerId){audio.event(type,characterOrder[id]??selectedCharacter);}
 function soundUI(){
@@ -575,12 +582,31 @@ async function unlockAudio(autoplay=false){
 soundUI();
 function updateHud(force=false) {
   if(!force&&elapsed-lastHud<.12)return;lastHud=elapsed;
-  const p=localPlayer(),alive=game.players.filter(a=>a.alive).length;
+  const p=cameraPlayer(),alive=game.players.filter(a=>a.alive).length;
+  $('world').setAttribute('aria-label',mode==='spectating'?`Наблюдение: ${p.name}`:`Трёхмерная арена. Ваш персонаж — ${CHARACTERS[characterOrder[playerId]].name}`);
+  $('minimap-player-label').textContent=mode==='spectating'?'Цель':'Ты';
+  document.querySelector('.minimap-legend .player-dot').style.background=`#${COLORS[p.id].toString(16)}`;
   $('alive-count').textContent=`${alive} / 6`;
-  $('range-value').textContent=p.range;$('bomb-value').textContent=`${game.bombs.filter(b=>b.owner===playerId).length} / ${p.capacity}`;
+  $('range-value').textContent=p.range;$('bomb-value').textContent=`${game.bombs.filter(b=>b.owner===p.id).length} / ${p.capacity}`;
   $('speed-value').textContent=`×${(1+(p.speed-1)*.07).toFixed(2)}`;
   $('roster').innerHTML=game.players.map(a=>`<div class="roster-player${a.alive?'':' eliminated'}${a.id===playerId?' is-you':''}"><i style="--player-color:#${COLORS[a.id].toString(16)}"></i><span>${escapeHtml(a.name)}</span><small>${a.alive?(a.face===p.face?'ЗДЕСЬ':FACES[a.face].name):'ВЫБЫЛ'}</small></div>`).join('');
   drawMinimap();
+  if(mode==='finish')updateRanking();
+  if(mode==='spectating')updateSpectatorControls();
+}
+function updateRanking(){
+  const ranked=[...game.players].sort((a,b)=>(a.place??0)-(b.place??0)||a.id-b.id);
+  $('finish-ranking').innerHTML=ranked.map(actor=>`<div class="result-player${actor.id===playerId?' is-you':''}${actor.alive?' is-alive':''}"><span class="result-place">${actor.place===null||actor.place===undefined?'—':`${actor.place}-е`}</span><span class="result-name">${escapeHtml(actor.name)}</span><span class="result-status">${actor.alive?(actor.place===1?'Победа!':'В игре'):'Выбыл'}</span></div>`).join('');
+}
+function updateSpectatorControls(){
+  const living=game.players.filter(actor=>actor.alive),selected=spectatedPlayer();
+  const key=living.map(actor=>`${actor.id}:${actor.name}`).join('|');
+  if(key!==spectatorRosterKey){
+    $('spectator-player').innerHTML=living.map(actor=>`<option value="${actor.id}">${escapeHtml(actor.name)}</option>`).join('');
+    spectatorRosterKey=key;
+  }
+  $('spectator-player').value=String(selected.id);
+  $('spectator-player').disabled=living.length===0||game.status==='finished';
 }
 function setMode(next) {
   mode=next;keys.clear();
@@ -592,12 +618,15 @@ function setMode(next) {
   $('pause-panel').classList.toggle('hidden',next!=='paused');$('finish-panel').classList.toggle('hidden',next!=='finish');$('help-panel').classList.toggle('hidden',next!=='help');
   $('countdown').classList.toggle('hidden',next!=='countdown');
   $('death-announcement').classList.toggle('hidden',next!=='dying');
+  $('spectator-controls').classList.toggle('hidden',next!=='spectating');
+  if(next==='spectating')updateSpectatorControls();
   $('pause').classList.toggle('hidden',onlineActive||['intro','online','finish','dying'].includes(next));$('touch-controls').classList.toggle('hidden',next!=='playing');
   document.querySelector('#finish-panel .modal-shortcut').classList.toggle('hidden',onlineActive);
   if(['playing','countdown','spectating'].includes(next))$('world').focus({preventScroll:true});
   document.body.dataset.mode=next;resize();
 }
 function resetRound(){
+  spectatorId=null;spectatorRosterKey='';
   resetDeathAnimations();
   game.multiplayer=false;game.humanIds=new Set([0]);game.botsEnabled=true;
   game.reset(Date.now());viewTurn=0;turnCamera(localPlayer().face,0,true);
@@ -608,7 +637,7 @@ function resetRound(){
   nextVoice=7;
 }
 function start() {
-  if(onlineActive){if(onlineRoom?.phase==='finished'){setMode('online');renderOnlineRoom();}else setMode('spectating');return;}
+  if(onlineActive){if(game.status==='finished'||onlineRoom?.phase==='finished'){setMode('online');renderOnlineRoom();}else setMode('spectating');return;}
   resetRound();
   countdownRemaining=3;lastCountdownNumber=3;$('countdown-number').textContent='3';
   setMode('countdown');unlockAudio().then(()=>{if(mode==='countdown')beep('countdown');});updateHud(true);$('world').focus();
@@ -621,7 +650,8 @@ function finish() {
   $('finish-title').textContent=won?'Победа!':`Место игрока: ${p.place??6}-е`;
   $('finish-description').textContent=won?'Ты пережил всех соперников. Куб твой!':'';
   $('finish-stats').textContent='';
-  $('restart').textContent=onlineActive?(onlineRoom?.phase==='finished'?'В комнату':'Наблюдать'):'Сыграть ещё';
+  updateRanking();
+  $('restart').textContent=onlineActive?(game.status==='finished'||onlineRoom?.phase==='finished'?'В комнату':'Наблюдать'):'Сыграть ещё';
   $('choose-character-finish').textContent=onlineActive?'Выйти из комнаты':'Выбрать персонажа';
   onlineResultShown=onlineActive;
   setMode('finish');
@@ -629,7 +659,7 @@ function finish() {
 }
 function handleEvents() {
   for(const event of game.events.splice(0)) {
-    if((event.type==='move'||event.type==='collapse-return')&&event.id===playerId&&event.from.face!==event.to.face) {
+    if((event.type==='move'||event.type==='collapse-return')&&event.id===(mode==='spectating'?spectatorId:playerId)&&event.from.face!==event.to.face) {
       viewTurn=(viewTurn+event.dir-event.previousDir+4)%4;turnCamera(event.to.face,viewTurn);
     }
     if(event.type==='bomb'||event.type==='kick'||event.type==='bonus'||event.type==='death')beep(event.type,event.owner??event.id??0);
@@ -649,19 +679,36 @@ function handleEvents() {
   }
 }
 const pageParameters=new URLSearchParams(location.search);
+let invitedRoom=pageParameters.has('room')?pageParameters.get('room').trim().toUpperCase():null;
+let onlineEntryPending=false;
 let serverAddress=CUBE_SERVER_URL;
 if(pageParameters.has('server')){
   try{const candidate=new URL(pageParameters.get('server'));if(['http:','https:','ws:','wss:'].includes(candidate.protocol))serverAddress=candidate.href;}catch{}
 }
 function showOnlineStatus(message){$('online-status').textContent=message;}
+function clearInvitation(){
+  if(invitedRoom===null)return;
+  invitedRoom=null;$('online-code').value='';
+  const url=new URL(location.href);url.searchParams.delete('room');history.replaceState(history.state,'',url);
+}
 function renderOnlineRoom(){
   const room=onlineRoom;
+  const invited=invitedRoom!==null&&!room;
+  $('online-entry').classList.toggle('is-invited',invited);
+  $('online-invitation').classList.toggle('hidden',!invited);
+  $('online-invited-code').textContent=invitedRoom||'—';
+  $('online-title').innerHTML=invited?'Войти в комнату<span>.</span>':'Игра с друзьями<span>.</span>';
+  $('online-join').classList.toggle('primary-button',invited);
+  $('online-join').classList.toggle('secondary-button',!invited);
+  $('online-create').disabled=$('online-join').disabled=onlineEntryPending;
+  $('online-join').textContent=onlineEntryPending?'Подключаемся…':'Войти';
+  $('online-name').setAttribute('enterkeyhint',invited?'go':'next');
   $('online-entry').classList.toggle('hidden',Boolean(room));
   $('online-lobby').classList.toggle('hidden',!room);
   if(!room)return;
   const host=room.hostId===memberId;
   $('online-room-code').textContent=room.roomId;
-  $('online-roster').innerHTML=room.slots.map(slot=>`<div class="${slot.id===playerId?'is-you ':''}${slot.isBot?'is-bot':''}"><i style="--player-color:#${CHARACTERS[slot.characterId].color.toString(16)}"></i><span>${escapeHtml(slot.nickname)}<small>${escapeHtml(CHARACTERS[slot.characterId].name)}</small></span><small>${slot.memberId===room.hostId?'ХОЗЯИН':slot.memberId===memberId?'ВЫ':slot.connected?'ГОТОВ':slot.memberId?'НЕТ СВЯЗИ':'БОТ'}</small></div>`).join('');
+  $('online-roster').innerHTML=room.slots.map(slot=>`<div class="${slot.id===playerId?'is-you ':''}${slot.isBot?'is-bot':''}"><i style="--player-color:#${CHARACTERS[slot.characterId].color.toString(16)}"></i><span>${slot.isBot?'🤖 ':''}${escapeHtml(slot.nickname)}<small>${escapeHtml(CHARACTERS[slot.characterId].name)}</small></span><small>${slot.memberId===room.hostId?'ХОЗЯИН':slot.memberId===memberId?'ВЫ':slot.connected?'ГОТОВ':slot.memberId?'НЕТ СВЯЗИ':'БОТ'}</small></div>`).join('');
   $('online-start').disabled=!host||!['lobby','finished'].includes(room.phase)||connectionState!=='connected';
   $('online-start').textContent=room.phase==='finished'?(host?'Новая партия':'Ждём хозяина комнаты'):room.phase==='lobby'?(host?'Начать матч':'Ждём хозяина комнаты'):'Матч идёт';
   if(connectionState==='connected')showOnlineStatus(room.phase==='lobby'?`${room.members.filter(m=>m.connected).length} из 6 игроков`:(room.phase==='finished'?'Матч завершён':'Матч идёт'));
@@ -673,11 +720,13 @@ function connectionStatus(status){
   $('online-connection').classList.toggle('hidden',!onlineActive||!message||mode==='online');
   if(message)showOnlineStatus(message);
   if(status==='reconnecting'||status==='disconnected'){keys.clear();clearTouchInput();}
+  if(status==='disconnected')onlineEntryPending=false;
   renderOnlineRoom();
 }
 function handleOnlineMessage(packet){
   if(!onlineActive)return;
   if(packet.type==='welcome'){
+    onlineEntryPending=false;
     playerId=packet.playerId;memberId=packet.memberId;
     networkRound=-1;networkTick=-1;lastInputDir=null;lastInputAt=-Infinity;
     $('online-code').value=packet.roomId;
@@ -700,6 +749,7 @@ function applyOnlineState(packet){
   if(!onlineRoom||packet.roundId<networkRound||(packet.roundId===networkRound&&packet.tick<networkTick))return;
   const fresh=packet.roundId!==networkRound;
   if(fresh){
+    spectatorId=null;spectatorRosterKey='';
     resetDeathAnimations();
     for(const g of blocks.values())g.removeFromParent();blocks.clear();
     for(const {mesh:m} of particles)m.removeFromParent();particles.length=0;
@@ -712,7 +762,7 @@ function applyOnlineState(packet){
   snapshotTime=game.time;snapshotReceivedAt=elapsed;
   if(fresh){applyCharacters();viewTurn=0;turnCamera(localPlayer().face,0,true);updateFaces();syncBlocks();}
   else if(oldGrid!==JSON.stringify(game.grid)||oldBounds!==JSON.stringify(game.faceBounds))syncBlocks();
-  for(const actor of game.players){const slot=onlineRoom.slots[actor.id];actor.name=`${actor.id===playerId?'Вы · ':slot.isBot?'Бот · ':''}${slot.nickname}`;}
+  for(const actor of game.players){const slot=onlineRoom.slots[actor.id];actor.name=`${actor.id===playerId?'Вы · ':slot.isBot?'🤖 ':''}${slot.nickname}`;}
   const events=(packet.events||[]).filter(event=>event.eventId>lastEventId);
   if(events.length)lastEventId=Math.max(...events.map(event=>event.eventId));
   game.events=events;handleEvents();
@@ -732,8 +782,10 @@ function applyOnlineState(packet){
 function ensureOnlineClient(){
   if(onlineClient)return onlineClient;
   onlineClient=new CubeClient({url:serverAddress,onMessage:handleOnlineMessage,onStatus:connectionStatus,onError:packet=>{
+    onlineEntryPending=false;
     showOnlineStatus(packet.message||'Не удалось войти в комнату.');
     if(['room_not_found','reconnect_expired'].includes(packet.code)){onlineRoom=null;$('online-lobby').classList.add('hidden');if(mode!=='online')setMode('online');}
+    renderOnlineRoom();
   }});
   return onlineClient;
 }
@@ -743,26 +795,41 @@ function openOnline(){
   renderOnlineRoom();setMode('online');
 }
 async function enterOnline(join){
-  const nickname=$('online-name').value.trim()||CHARACTERS[selectedCharacter].name,roomId=$('online-code').value.trim().toUpperCase();
-  if(join&&!/^[A-F0-9]{8}$/.test(roomId)){showOnlineStatus('Введи код комнаты из 8 символов.');return;}
+  if(onlineEntryPending)return;
+  if(invitedRoom!==null)join=true;
+  const nickname=$('online-name').value.trim()||CHARACTERS[selectedCharacter].name,roomId=invitedRoom??$('online-code').value.trim().toUpperCase();
+  if(join&&!/^[A-F0-9]{8}$/.test(roomId)){showOnlineStatus(invitedRoom!==null?'Приглашение повреждено. Попроси новую ссылку.':'Введи код комнаты из 8 символов.');return;}
   try{localStorage.setItem('cube-bomber-nickname',nickname);}catch{}
   onlineActive=true;onlineResultShown=false;networkRound=-1;networkTick=-1;
-  $('online-create').disabled=$('online-join').disabled=true;
-  try{const client=ensureOnlineClient();if(join)await client.join({roomId,nickname,characterId:selectedCharacter});else await client.create({nickname,characterId:selectedCharacter});}
-  catch(error){showOnlineStatus(error.message||'Сервер недоступен. Попробуй ещё раз.');}
-  finally{$('online-create').disabled=$('online-join').disabled=false;}
+  const client=ensureOnlineClient();onlineEntryPending=true;renderOnlineRoom();
+  try{if(join)await client.join({roomId,nickname,characterId:selectedCharacter});else await client.create({nickname,characterId:selectedCharacter});}
+  catch(error){if(client===onlineClient){onlineEntryPending=false;renderOnlineRoom();showOnlineStatus(error.message||'Сервер недоступен. Попробуй ещё раз.');}}
 }
 function leaveOnline(){
+  clearInvitation();
+  onlineEntryPending=false;
   onlineActive=false;onlineClient?.destroy();onlineClient=null;onlineRoom=null;memberId=null;playerId=0;
   networkRound=-1;networkTick=-1;lastEventId=0;onlineResultShown=false;
   $('online-connection').classList.add('hidden');$('online-lobby').classList.add('hidden');
   resetRound();setMode('intro');updateHud(true);
 }
 $('online-open').addEventListener('click',openOnline);
-$('online-close').addEventListener('click',()=>{if(onlineActive)leaveOnline();else setMode('intro');});
+$('online-close').addEventListener('click',()=>{if(onlineActive)leaveOnline();else{clearInvitation();setMode('intro');}});
 $('online-create').addEventListener('click',()=>enterOnline(false));
 $('online-join').addEventListener('click',()=>enterOnline(true));
+for(const input of [$('online-name'),$('online-code')])input.addEventListener('keydown',event=>{
+  if(event.key==='Enter'&&!event.isComposing&&(invitedRoom!==null||input.id==='online-code')){
+    event.preventDefault();if(!$('online-join').disabled)enterOnline(true);
+  }
+});
 $('online-leave').addEventListener('click',leaveOnline);
+$('spectator-player').addEventListener('change',()=>{
+  if(mode!=='spectating')return;
+  const actor=game.players.find(player=>player.alive&&player.id===Number($('spectator-player').value));
+  if(!actor)return;
+  spectatorId=actor.id;viewTurn=0;turnCamera(actor.face,0);updateHud(true);
+});
+$('spectator-results').addEventListener('click',finish);
 $('online-start').addEventListener('click',()=>{if(onlineRoom?.phase==='finished')onlineClient?.returnLobby();else{unlockAudio();onlineClient?.start();}});
 $('online-invite').addEventListener('click',async()=>{
   if(!onlineRoom)return;
@@ -814,7 +881,7 @@ addEventListener('keydown',e=>{
   if(e.code==='Escape'||e.code==='KeyP') {if(mode==='paused')resumeGame();else if(mode==='help')setMode(helpReturn);else pauseGame();return;}
   if(e.code==='Enter'&&(mode==='intro'||mode==='finish')){start();return;}
   if(e.code==='KeyR'&&mode==='finish'){start();return;}
-  if((mode==='playing'||mode==='spectating')&&(e.code==='KeyQ'||e.code==='KeyE')&&cameraTween>=1){viewTurn=(viewTurn+(e.code==='KeyQ'?3:1))%4;turnCamera((mode==='spectating'?game.players.find(p=>p.alive):localPlayer())?.face??localPlayer().face,viewTurn);}
+  if((mode==='playing'||mode==='spectating')&&(e.code==='KeyQ'||e.code==='KeyE')&&cameraTween>=1){viewTurn=(viewTurn+(e.code==='KeyQ'?3:1))%4;turnCamera(cameraPlayer().face,viewTurn);}
   if(mode!=='playing')return;
   if(e.code in codeDirs){keys.delete(e.code);keys.add(e.code);moveInput();}
   if(e.code==='Space')pressBomb();
@@ -840,7 +907,7 @@ function moveInput() {
   if(cameraTween>=1&&dir!==null)game.move(playerId,dir);
 }
 applyCharacters();syncBlocks();updateHud(true);setMode('intro');unlockAudio(true);
-if(pageParameters.has('room')){$('online-code').value=pageParameters.get('room').toUpperCase();openOnline();}
+if(invitedRoom!==null){$('online-code').value=invitedRoom;openOnline();}
 let previous=performance.now();
 function frame(now) {
   requestAnimationFrame(frame);const wallDt=(now-previous)/1000,dt=Math.min(wallDt,.05);previous=now;elapsed+=dt;
